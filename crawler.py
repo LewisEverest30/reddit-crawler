@@ -12,7 +12,7 @@ import re
 
 def setup_logger(debug=False):
     level = logging.DEBUG if debug else logging.INFO
-    format_str = '%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s' if debug else '%(asctime)s - %(levelname)s - %(message)s'
+    format_str = '%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
     
     logging.basicConfig(
         level=level,
@@ -56,6 +56,7 @@ class RedditCrawler:
         
         # 存储数据
         self.all_posts_data = []
+        self.total_crawled_count = 0
         
         # Playwright对象
         self.playwright = None
@@ -142,9 +143,16 @@ class RedditCrawler:
                 except Exception:
                     # 如果页面上下文失效，跳过这个检测
                     continue
-            
+
             # 也检查页面文本中是否包含验证以及登录相关内容
             if not captcha_found:
+                # 检查页面是否包含正常的Reddit数据结构，如果有就跳过验证检测
+                json_element = await self.page.query_selector("pre")
+                json_string = await json_element.text_content()
+                if "title" in  json_string \
+                    and "author" in json_string \
+                    and "selftext" in json_string:
+                    return
                 try:
                     page_text = await self.page.locator('body').text_content()
                     if page_text:
@@ -186,7 +194,7 @@ class RedditCrawler:
                         logging.warning(f"重新加载页面失败: {e}")
                         
         except Exception as e:
-            logging.debug(f"CAPTCHA检测时出错: {e}")
+            logging.error(f"CAPTCHA检测时出错: {e}")
 
     async def _simulate_human_browse_a_post_behavior(self, random_rate=0.2):
         """模拟人类浏览行为 - 随机点击帖子并浏览"""
@@ -269,12 +277,13 @@ class RedditCrawler:
                 pass
 
     def save_progress(self, current_index, url_list):
-        """保存爬取进度"""
+        """保存爬取进度（完整保存，主要用于第一阶段）"""
         try:
             state_data = {
                 "current_post_index": current_index,
                 "collected_urls_with_source": url_list,
                 "total_collected": len(url_list),
+                "total_crawled_count": self.total_crawled_count,
                 "subreddit_name": self.subreddit_name,
                 "max_posts": self.max_posts,
                 "sampling_ratios": self.sampling_ratios,
@@ -286,6 +295,29 @@ class RedditCrawler:
                 
         except Exception as e:
             logging.warning(f"保存进度失败: {e}")
+    
+    def update_progress_index(self, current_index):
+        """只更新当前处理索引（轻量级更新，主要用于第二阶段）"""
+        try:
+            # 读取现有状态文件
+            if not os.path.exists(self.state_file):
+                logging.error("状态文件不存在，无法更新进度索引")
+                raise FileNotFoundError("状态文件不存在，无法更新进度索引")
+                
+            with open(self.state_file, 'r', encoding='utf-8') as f:
+                state_data = json.load(f)
+            
+            # 更新关键字段
+            state_data["current_post_index"] = current_index
+            state_data["total_crawled_count"] = self.total_crawled_count
+            state_data["last_updated"] = datetime.datetime.now().isoformat()
+            
+            # 写回文件
+            with open(self.state_file, 'w', encoding='utf-8') as f:
+                json.dump(state_data, f, ensure_ascii=False, indent=2)
+                
+        except Exception as e:
+            logging.error(f"更新进度索引失败: {e}")
 
     def load_progress(self):
         """加载爬取进度"""
@@ -296,18 +328,23 @@ class RedditCrawler:
                 
                 current_index = state_data.get('current_post_index', 1)
                 url_list = state_data.get('collected_urls_with_source', [])
+                self.total_crawled_count = state_data.get('total_crawled_count', 0)
                 
                 if url_list and current_index <= len(url_list):
-                    logging.info(f"恢复进度: {current_index}/{len(url_list)}")
+                    logging.info(f"恢复进度: {current_index}/{len(url_list)}，已爬取 {self.total_crawled_count} 条帖子")
                     return current_index, url_list
         except Exception:
             pass
         
         return 1, []
 
-    def save_data(self):
+    def save_data(self, current_index):
         """保存数据到JSON文件"""
         try:
+            # 如果没有新数据需要保存，直接返回
+            if not self.all_posts_data:
+                return
+                
             # 读取现有数据
             existing_data = []
             if os.path.exists(self.output_file):
@@ -322,8 +359,17 @@ class RedditCrawler:
             
             with open(self.output_file, 'w', encoding='utf-8') as f:
                 json.dump(all_data, f, ensure_ascii=False, indent=4)
-                
-            logging.info(f"保存数据成功，总计 {len(all_data)} 条帖子")
+            
+            # 更新总计数器
+            self.total_crawled_count += len(self.all_posts_data)
+            
+            logging.info(f"保存数据成功，新增 {len(self.all_posts_data)} 条，文件总计 {len(all_data)} 条，本次运行已爬取 {self.total_crawled_count} 条帖子")
+            
+            # 清空已保存的数据，避免重复保存
+            self.all_posts_data.clear()
+
+            # 更新进度索引 - 使用轻量级方法
+            self.update_progress_index(current_index)
             
         except Exception as e:
             logging.error(f"保存数据失败: {e}")
@@ -397,7 +443,8 @@ class RedditCrawler:
         attempts = 0
         while len(collected) < target_count and attempts < 5:
             try:
-                links = await self.page.query_selector_all('a[href*="/comments/"]')
+                # links = await self.page.query_selector_all('a[href*="/comments/"]')
+                links = await self.page.query_selector_all('a[href*="/comments/"]:not([data-testid*="ad"]):not([data-adtype])')
                 new_found = 0
                 
                 for link in links:
@@ -475,7 +522,6 @@ class RedditCrawler:
             post_info = raw_data[0]['data']['children'][0]['data']
             comments_tree = raw_data[1]['data']['children']
             
-            logging.info(f"获取帖子JSON成功: {post_info}")
             # 提取帖子数据
             post_data = {
                 "post_id": self._extract_post_id(post_url),
@@ -577,6 +623,10 @@ class RedditCrawler:
                 if not url_list:
                     logging.error("未收集到任何帖子链接")
                     return
+                
+                # 第一阶段完成后，保存进度（从index=1开始处理）
+                self.save_progress(1, url_list)
+                logging.info(f"第一阶段完成，已收集 {len(url_list)} 个帖子URL，进度已保存")
             
             total_posts = len(url_list)
             logging.info(f"开始爬取 {total_posts} 个帖子，从第 {current_index} 个开始")
@@ -591,20 +641,16 @@ class RedditCrawler:
                 current_index = index + 1
                 
                 logging.info(f"[{current_index}/{total_posts}] 处理[{source_type}]: {url}")
-                
-                # 保存进度
-                self.save_progress(current_index, url_list)
-                
+                                
                 try:
                     post_data = await self.fetch_post_json(url, source_type)
                     
                     if post_data:
                         self.all_posts_data.append(post_data)
                         consecutive_failures = 0
-                        
-                        # 每10个帖子保存一次数据
+                        # 每10个帖子保存一次数据，传递当前进度信息
                         if len(self.all_posts_data) % 10 == 0:
-                            self.save_data()
+                            self.save_data(current_index)
                     else:
                         consecutive_failures += 1
                         if consecutive_failures >= 3:
@@ -636,6 +682,9 @@ class RedditCrawler:
             # 保存最终数据
             if self.all_posts_data:
                 self.save_data()
+            
+            # 显示最终统计
+            logging.info(f"爬取结束，本次运行总共爬取了 {self.total_crawled_count} 条帖子")
             
             # 正常完成时清理状态文件
             if completed_normally:
