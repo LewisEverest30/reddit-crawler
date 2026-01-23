@@ -28,12 +28,13 @@ def setup_logger(debug=False):
 class RedditCrawler:
 
     def __init__(self, subreddit_url, max_posts=100, headless=False, 
-                 use_system_browser='chrome', delays=None):
+                 use_system_browser='chrome', delays=None, before_timestamp=None):
 
         self.subreddit_url = subreddit_url
         self.max_posts = max_posts
         self.headless = headless
         self.use_system_browser = use_system_browser
+        self.before_timestamp = before_timestamp or int(time.time())
         self.delays = delays or {
             'page_min': 2000, 'page_max': 5000,
             'action_min': 500, 'action_max': 1500,
@@ -304,37 +305,33 @@ class RedditCrawler:
     def save_url_collection_progress(self, collected_urls, before_timestamp, target_count):
         """保存URL收集阶段的进度"""
         try:
-            # 计算最新收集帖子的时间戳（从最后一个URL提取）
-            # latest_post_timestamp: 最新收集帖子的创建时间，用于断点续爬时避免重复
-            # before_timestamp: API分页用的时间戳，用于获取下一页数据
             latest_post_timestamp = None
-            collected_post_ids = set()  # 收集已有帖子ID用于去重
+            collected_post_ids = []
             
             if collected_urls:
-                # 从最后一个收集的URL中提取时间戳
-                last_url_data = collected_urls[-1]
-                latest_post_timestamp = last_url_data.get('created_utc', before_timestamp)
+                # 获取最新帖子时间戳
+                latest_post_timestamp = collected_urls[-1].get('created_utc', before_timestamp)
                 
-                # 收集所有已有帖子的ID
-                for url_data in collected_urls:
-                    post_url = url_data.get('url', '')
-                    post_id = self._extract_post_id(post_url)
-                    if post_id:
-                        collected_post_ids.add(post_id)
+                # 提取所有帖子ID
+                collected_post_ids = [self._extract_post_id(item.get('url', '')) 
+                                     for item in collected_urls]
+                collected_post_ids = [pid for pid in collected_post_ids if pid]  # 过滤空值
             
             collection_progress = {
                 "collected_count": len(collected_urls),
                 "target_count": target_count,
                 "latest_post_timestamp": latest_post_timestamp or before_timestamp,
                 "before_timestamp": before_timestamp,
-                "collected_post_ids": list(collected_post_ids),  # 保存已收集帖子ID
+                "collected_post_ids": collected_post_ids,
                 "last_collection_time": datetime.datetime.now().isoformat(),
-                "is_collection_complete": len(collected_urls) >= target_count  # 显式标记是否完成
+                "is_collection_complete": len(collected_urls) >= target_count
             }
             
-            # 保存完整进度，包括已收集的URL和收集进度
-            self.save_progress(1, collected_urls, is_collection_complete=len(collected_urls) >= target_count, collection_progress=collection_progress)
-            logging.info(f"URL收集进度已保存: {len(collected_urls)}/{target_count}，最新帖子时间: {latest_post_timestamp}，已收集ID数: {len(collected_post_ids)}")
+            is_complete = len(collected_urls) >= target_count
+            self.save_progress(1, collected_urls, is_complete, collection_progress)
+            
+            logging.info(f"URL收集进度已保存: {len(collected_urls)}/{target_count}，"
+                        f"最新帖子时间: {latest_post_timestamp}，已收集ID数: {len(collected_post_ids)}")
             
         except Exception as e:
             logging.error(f"保存URL收集进度失败: {e}")
@@ -368,33 +365,36 @@ class RedditCrawler:
             if os.path.exists(self.state_file):
                 with open(self.state_file, 'r', encoding='utf-8') as f:
                     state_data = json.load(f)
+                
                 current_index = state_data.get('current_post_index', 1)
                 url_list = state_data.get('collected_urls_with_source', [])
                 self.total_crawled_count = state_data.get('total_crawled_count', 0)
                 collection_progress = state_data.get('url_collection_progress', None)
                 
-                # 判断是否已完成URL收集
-                target_post_count = self.max_posts
-                is_collection_complete = len(url_list) >= target_post_count
+                # 判断URL收集是否完成
+                is_collection_complete = len(url_list) >= self.max_posts
                 
-                if is_collection_complete and current_index <= len(url_list):
-                    # URL收集完成且在进行第二阶段爬取
-                    logging.info(f"恢复第二阶段进度: {current_index}/{len(url_list)}，已爬取 {self.total_crawled_count} 条帖子")
-                    return current_index, url_list, True, collection_progress
-                elif not is_collection_complete:
-                    # URL收集未完成，需要继续收集
-                    if collection_progress:
-                        latest_time = collection_progress.get('latest_post_timestamp', 'N/A')
-                        logging.info(f"恢复URL收集进度: {len(url_list)}/{target_post_count}，最新帖子时间: {latest_time}")
+                if is_collection_complete:
+                    if current_index <= len(url_list):
+                        # URL收集完成且在进行第二阶段
+                        logging.info(f"恢复第二阶段进度: {current_index}/{len(url_list)}，"
+                                    f"已爬取 {self.total_crawled_count} 条帖子")
                     else:
-                        raise ValueError("URL收集进度数据缺失，无法继续收集")
-                    return 1, url_list, False, collection_progress
+                        # current_index异常，重置为第二阶段开始
+                        logging.info(f"URL收集已完成，从第二阶段开始: 1/{len(url_list)}")
+                        current_index = 1
+                    return current_index, url_list, True, collection_progress
                 else:
-                    # URL收集完成但current_index异常，重置为第二阶段开始
-                    logging.info(f"URL收集已完成，从第二阶段开始: 1/{len(url_list)}")
-                    return 1, url_list, True, collection_progress
-        except Exception:
-            pass
+                    # URL收集未完成，需要继续收集
+                    if not collection_progress:
+                        raise ValueError("URL收集进度数据缺失")
+                    
+                    latest_time = collection_progress.get('latest_post_timestamp', 'N/A')
+                    logging.info(f"恢复URL收集进度: {len(url_list)}/{self.max_posts}，"
+                                f"最新帖子时间: {latest_time}")
+                    return 1, url_list, False, collection_progress
+        except Exception as e:
+            logging.warning(f"加载进度失败: {e}")
         
         return 1, [], False, {}
 
@@ -434,6 +434,62 @@ class RedditCrawler:
         except Exception as e:
             logging.error(f"保存数据失败: {e}")
 
+    def _initialize_collection_state(self, existing_urls, collection_progress):
+        """初始化URL收集状态"""
+        collected_urls = existing_urls or []
+        collected_post_ids = set()
+        before = self.before_timestamp
+        
+        if collection_progress:
+            # 恢复已收集的帖子ID集合
+            existing_ids = collection_progress.get('collected_post_ids', [])
+            collected_post_ids.update(existing_ids)
+            
+            # 使用before_timestamp作为起始点，避免漏掉同时间戳帖子
+            before = collection_progress.get('before_timestamp', self.before_timestamp)
+            latest_time = collection_progress.get('latest_post_timestamp', self.before_timestamp)
+            
+            logging.info(f"恢复URL收集进度: {len(collected_urls)}个帖子，{len(collected_post_ids)}个ID")
+            logging.info(f"从时间戳 {before} 继续，最新: {latest_time}")
+        else:
+            # 初始化时提取已有URL的ID
+            for url_data in collected_urls:
+                post_id = self._extract_post_id(url_data.get('url', ''))
+                if post_id:
+                    collected_post_ids.add(post_id)
+        
+        return collected_urls, collected_post_ids, before
+    
+    def _process_api_response(self, new_posts, collected_urls, collected_post_ids, max_posts):
+        """处理API响应数据"""
+        new_count = 0
+        duplicate_count = 0
+        
+        for post in new_posts:
+            if len(collected_urls) >= max_posts:
+                break
+            
+            post_id = post.get("id")
+            permalink = post.get("permalink")
+            created_utc = post.get("created_utc")
+            
+            if not (post_id and permalink and created_utc):
+                continue
+                
+            if post_id in collected_post_ids:
+                duplicate_count += 1
+                continue
+            
+            post_url = f"https://www.reddit.com{permalink}"
+            collected_urls.append({
+                "url": post_url,
+                "created_utc": created_utc
+            })
+            collected_post_ids.add(post_id)
+            new_count += 1
+        
+        return new_count, duplicate_count
+    
     async def collect_post_urls(self, target_url, existing_urls=None, collection_progress=None):
         """收集帖子URL - 两阶段爬取的第一阶段，使用Pullpush API，支持断点续爬"""
         if "/comments/" in target_url:
@@ -446,55 +502,35 @@ class RedditCrawler:
             return []
         
         # 初始化收集状态
-        collected_urls = existing_urls or []
-        before = None
-        collected_post_ids = set()  # 用于去重的帖子ID集合
+        collected_urls, collected_post_ids, before = self._initialize_collection_state(
+            existing_urls, collection_progress)
         
-        # 如果有收集进度，恢复状态
-        if collection_progress:
-            # 恢复已收集的帖子ID集合
-            existing_post_ids = collection_progress.get('collected_post_ids', [])
-            collected_post_ids.update(existing_post_ids)
-            
-            # 使用before_timestamp作为起始点，而不是latest_post_timestamp
-            # 这样可以避免漏掉同一时间戳的其他帖子
-            before = collection_progress.get('before_timestamp')
-            latest_post_timestamp = collection_progress.get('latest_post_timestamp')
-            
-            logging.info(f"恢复URL收集进度，已收集 {len(collected_urls)} 个帖子，已有ID: {len(collected_post_ids)} 个")
-            logging.info(f"从时间戳 {before} 继续，最新帖子时间: {latest_post_timestamp}")
-        else:
-            logging.info(f"开始收集r/{subreddit_name}的帖子，目标数量: {self.max_posts}")
-            # 初始化已有URL的ID集合
-            for url_data in collected_urls:
-                post_url = url_data.get('url', '')
-                post_id = self._extract_post_id(post_url)
-                if post_id:
-                    collected_post_ids.add(post_id)
+        if not collection_progress:
+            logging.info(f"开始收集 r/{subreddit_name} 的帖子，目标数量: {self.max_posts}")
         
         consecutive_errors = 0
+        consecutive_zero_new = 0  # 连续获取0个新URL的次数
         last_save_count = len(collected_urls)
         
         try:
             while len(collected_urls) < self.max_posts:
                 try:
-                    # 构造API请求
+                    # 构造并发送API请求
                     api_url = "https://api.pullpush.io/reddit/search/submission/"
                     params = {
                         "subreddit": subreddit_name,
-                        "size": min(100, self.max_posts - len(collected_urls)),
+                        "size": min(100, self.max_posts - len(collected_urls) + 1),
                         "sort": "desc",
                         "sort_type": "created_utc"
                     }
                     if before:
                         params["before"] = before
                     
-                    # 发送请求
-                    logging.info(f"正在请求Pullpush API，已收集 {len(collected_urls)}/{self.max_posts} 个帖子...")
+                    logging.info(f"请求API: {len(collected_urls)}/{self.max_posts} 个帖子")
                     response = requests.get(api_url, params=params, timeout=30)
                     
                     if response.status_code != 200:
-                        logging.error(f"Pullpush API请求失败: HTTP {response.status_code}")
+                        logging.error(f"API请求失败: HTTP {response.status_code}")
                         consecutive_errors += 1
                         if consecutive_errors >= 3:
                             logging.error("连续请求失败，停止收集")
@@ -510,95 +546,64 @@ class RedditCrawler:
                         break
                     
                     # 处理新获取的帖子
-                    new_urls_count = 0
-                    duplicate_count = 0
+                    new_count, duplicate_count = self._process_api_response(
+                        new_posts, collected_urls, collected_post_ids, self.max_posts)
                     
-                    for post in new_posts:
-                        if len(collected_urls) >= self.max_posts:
+                    # 检测连续多次获取0个新URL的情况
+                    if new_count == 0:
+                        consecutive_zero_new += 1
+                        if consecutive_zero_new >= 3:
+                            logging.info("连续多次未获取到新URL，可能已无更多数据，URL收集完成")
                             break
-                        
-                        # 构造Reddit帖子URL
-                        post_id = post.get("id")
-                        permalink = post.get("permalink")
-                        created_utc = post.get("created_utc")
-                        
-                        if post_id and permalink and created_utc:
-                            # 检查是否已经收集过这个帖子
-                            if post_id in collected_post_ids:
-                                duplicate_count += 1
-                                continue
-                            
-                            post_url = f"https://www.reddit.com{permalink}"
-                            # 在URL数据中记录帖子的创建时间，用于断点续爬
-                            collected_urls.append({
-                                "url": post_url,
-                                "created_utc": created_utc
-                            })
-                            collected_post_ids.add(post_id)  # 添加到去重集合
-                            new_urls_count += 1
+                    else:
+                        consecutive_zero_new = 0  # 重置计数器
                     
                     # 更新时间戳用于下一页
                     if new_posts:
                         before = new_posts[-1]["created_utc"]
                     
                     consecutive_errors = 0  # 成功请求，重置错误计数
-                    logging.info(f"本次获取 {new_urls_count} 个新URL，跳过 {duplicate_count} 个重复，总计 {len(collected_urls)} 个")
+                    logging.info(f"获取 {new_count} 个新URL，跳过 {duplicate_count} 个重复，总计 {len(collected_urls)}")
                     
-                    # 每收集50个URL或每5次请求保存一次进度
-                    if len(collected_urls) - last_save_count >= 50 or len(collected_urls) % 250 == 0:
+                    # 定期保存进度
+                    if (len(collected_urls) - last_save_count >= 50 or 
+                        len(collected_urls) % 250 == 0):
                         self.save_url_collection_progress(collected_urls, before, self.max_posts)
                         last_save_count = len(collected_urls)
                     
-                    # 遵守API速率限制
-                    time.sleep(1)
+                    time.sleep(1)  # API速率限制
                     
-                except requests.exceptions.Timeout:
-                    logging.error("请求超时，重试中...")
+                except (requests.exceptions.Timeout, 
+                        requests.exceptions.RequestException, 
+                        json.JSONDecodeError) as e:
                     consecutive_errors += 1
+                    logging.error(f"请求错误: {e}")
                     time.sleep(3)
                     if consecutive_errors >= 5:
-                        logging.error("连续超时过多，保存当前进度并退出")
-                        break
-                    continue
-                except requests.exceptions.RequestException as e:
-                    logging.error(f"网络请求错误: {e}")
-                    consecutive_errors += 1
-                    time.sleep(3)
-                    if consecutive_errors >= 5:
-                        break
-                    continue
-                except json.JSONDecodeError as e:
-                    logging.error(f"JSON解析错误: {e}")
-                    consecutive_errors += 1
-                    time.sleep(3)
-                    if consecutive_errors >= 5:
+                        logging.error("连续错误过多，保存进度并退出")
                         break
                     continue
                 except KeyboardInterrupt:
-                    logging.info("用户中断URL收集，保存当前进度...")
+                    logging.info("用户中断，保存进度...")
                     raise
                 except Exception as e:
-                    logging.error(f"收集帖子URL时出错: {e}")
                     consecutive_errors += 1
+                    logging.error(f"收集URL时出错: {e}")
                     if consecutive_errors >= 3:
                         break
                     time.sleep(2)
-                    continue
         
         except KeyboardInterrupt:
-            # 用户中断时保存进度
             logging.info("收集被中断，保存进度...")
             self.save_url_collection_progress(collected_urls, before, self.max_posts)
             raise
         
-        # 最终保存（无论是否完成）
+        # 最终保存进度
         if len(collected_urls) != last_save_count or len(collected_urls) >= self.max_posts:
-            # 总是保存最终进度，无论是否完成
             self.save_url_collection_progress(collected_urls, before, self.max_posts)
-            if len(collected_urls) >= self.max_posts:
-                logging.info(f"URL收集完成，总共收集到 {len(collected_urls)} 个帖子URL，去重后有效ID: {len(collected_post_ids)}")
-            else:
-                logging.info(f"URL收集未完成，当前进度: {len(collected_urls)}/{self.max_posts}，去重后有效ID: {len(collected_post_ids)}")
+            status = "完成" if len(collected_urls) >= self.max_posts else "未完成"
+            logging.info(f"URL收集{status}: {len(collected_urls)}/{self.max_posts}，"
+                        f"去重后有效ID: {len(collected_post_ids)}")
         
         return collected_urls[:self.max_posts]
     
@@ -830,7 +835,7 @@ async def main():
     
     # 配置参数
     target_url = "https://www.reddit.com/r/dogs/"
-    max_posts = 5000
+    max_posts = 50000
     headless = False
     use_system_browser = 'chrome'  # 'chrome', 'edge', 或 None
     
@@ -839,6 +844,7 @@ async def main():
         max_posts=max_posts,
         headless=headless,
         use_system_browser=use_system_browser,
+        before_timestamp=int(datetime.datetime(2026, 1, 22).timestamp()),
         delays={
             'page_min': 3000, 'page_max': 5000,
             'action_min': 3000, 'action_max': 8000,
