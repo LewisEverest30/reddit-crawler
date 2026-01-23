@@ -258,8 +258,8 @@ class URLCollector:
                     new_count, duplicate_count, deleted_count = self._process_api_response(
                         new_posts, collected_urls, collected_post_ids, self.max_posts)
                     
-                    # 检测连续多次获取0个新URL的情况
-                    if new_count == 0:
+                    # 检测连续多次获取0个新URL且0个被删除的帖子，说明全是重复数据
+                    if new_count == 0 and deleted_count == 0:
                         consecutive_zero_new += 1
                         if consecutive_zero_new >= 3:
                             logging.info("连续多次未获取到新URL，可能已无更多数据，URL收集完成")
