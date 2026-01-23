@@ -43,8 +43,8 @@ class URLCollector:
         self.subreddit_dir = f".\\outputs\\{self.subreddit_name}"
         Path(self.subreddit_dir).mkdir(parents=True, exist_ok=True)
         
-        # 状态记录路径
-        self.state_file = os.path.join(self.subreddit_dir, f"{self.subreddit_name}_crawler_state.json")
+        # URL收集状态文件路径
+        self.state_file = os.path.join(self.subreddit_dir, f"{self.subreddit_name}_urls.json")
 
     def _extract_subreddit_name(self, url):
         """从Reddit URL中提取subreddit名称"""
@@ -56,119 +56,86 @@ class URLCollector:
         match = re.search(r'/comments/([a-zA-Z0-9]+)/', url)
         return match.group(1) if match else None
 
-    def save_progress(self, current_index, url_list, is_collection_complete=False, collection_progress=None):
-        """保存爬取进度（完整保存，主要用于第一阶段）"""
+    def _atomic_write_json(self, file_path, data, indent=2):
+        """原子写入JSON文件，避免中断时文件被截断"""
+        temp_file = file_path + ".tmp"
         try:
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=indent)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_file, file_path)
+        except Exception as e:
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
+            raise e
+
+    def save_progress(self, collected_urls, before_timestamp, collected_post_ids):
+        """保存URL收集进度"""
+        try:
+            is_complete = len(collected_urls) >= self.max_posts
+            
             state_data = {
-                "current_post_index": current_index,
-                "collected_urls": url_list,
-                "total_collected": len(url_list),
-                "total_crawled_count": 0,
                 "subreddit_name": self.subreddit_name,
                 "max_posts": self.max_posts,
+                "total_collected": len(collected_urls),
+                "is_complete": is_complete,
+                "before_timestamp": before_timestamp,
+                "collected_urls": collected_urls,
+                "collected_post_ids": list(collected_post_ids),
                 "last_updated": datetime.datetime.now().isoformat()
             }
             
-            # 如果提供了URL收集进度，也保存
-            if collection_progress:
-                state_data["url_collection_progress"] = collection_progress
+            self._atomic_write_json(self.state_file, state_data)
             
-            # 保存是否完成URL收集的标志
-            state_data["is_collection_complete"] = is_collection_complete
-            
-            with open(self.state_file, 'w', encoding='utf-8') as f:
-                json.dump(state_data, f, ensure_ascii=False, indent=2)
-                
-        except Exception as e:
-            logging.warning(f"保存进度失败: {e}")
-
-    def save_url_collection_progress(self, collected_urls, before_timestamp, target_count):
-        """保存URL收集阶段的进度"""
-        try:
-            latest_post_timestamp = None
-            collected_post_ids = []
-            
-            if collected_urls:
-                # 获取最新帖子时间戳
-                latest_post_timestamp = collected_urls[-1].get('created_utc', before_timestamp)
-                
-                # 提取所有帖子ID
-                collected_post_ids = [self._extract_post_id(item.get('url', '')) 
-                                     for item in collected_urls]
-                collected_post_ids = [pid for pid in collected_post_ids if pid]  # 过滤空值
-            
-            collection_progress = {
-                "collected_count": len(collected_urls),
-                "target_count": target_count,
-                "latest_post_timestamp": latest_post_timestamp or before_timestamp,
-                "before_timestamp": before_timestamp,
-                "collected_post_ids": collected_post_ids,
-                "last_collection_time": datetime.datetime.now().isoformat(),
-                "is_collection_complete": len(collected_urls) >= target_count
-            }
-            
-            is_complete = len(collected_urls) >= target_count
-            self.save_progress(1, collected_urls, is_complete, collection_progress)
-            
-            logging.info(f"URL收集进度已保存: {len(collected_urls)}/{target_count}，"
-                        f"最新帖子时间: {latest_post_timestamp}，已收集ID数: {len(collected_post_ids)}")
+            status = "完成" if is_complete else "进行中"
+            logging.info(f"URL收集进度已保存: {len(collected_urls)}/{self.max_posts} ({status})")
             
         except Exception as e:
-            logging.error(f"保存URL收集进度失败: {e}")
+            logging.error(f"保存进度失败: {e}")
 
     def load_progress(self) -> tuple:
-        """加载爬取进度"""
+        """加载URL收集进度"""
         try:
             if os.path.exists(self.state_file):
                 with open(self.state_file, 'r', encoding='utf-8') as f:
                     state_data = json.load(f)
                 
-                url_list = state_data.get('collected_urls', [])
-                collection_progress = state_data.get('url_collection_progress', None)
+                collected_urls = state_data.get('collected_urls', [])
+                before_timestamp = state_data.get('before_timestamp', self.before_timestamp)
+                collected_post_ids = set(state_data.get('collected_post_ids', []))
+                is_complete = state_data.get('is_complete', False)
                 
-                # 判断URL收集是否完成
-                is_collection_complete = len(url_list) >= self.max_posts
-                
-                if is_collection_complete:
-                    logging.info(f"URL收集已完成: {len(url_list)} 个帖子")
-                    return url_list, True, collection_progress
+                if is_complete:
+                    logging.info(f"URL收集已完成: {len(collected_urls)} 个帖子")
                 else:
-                    # URL收集未完成，需要继续收集
-                    if collection_progress:
-                        latest_time = collection_progress.get('latest_post_timestamp', 'N/A')
-                        logging.info(f"恢复URL收集进度: {len(url_list)}/{self.max_posts}，"
-                                    f"最新帖子时间: {latest_time}")
-                    return url_list, False, collection_progress
+                    logging.info(f"恢复URL收集进度: {len(collected_urls)}/{self.max_posts}")
+                
+                return collected_urls, before_timestamp, collected_post_ids, is_complete
+                
         except Exception as e:
             logging.warning(f"加载进度失败: {e}")
         
-        return [], False, {}
+        return [], self.before_timestamp, set(), False
 
-    def _initialize_collection_state(self, existing_urls, collection_progress):
+    def _initialize_collection_state(self, collected_urls, before_timestamp, collected_post_ids):
         """初始化URL收集状态"""
-        collected_urls = existing_urls or []
-        collected_post_ids = set()
-        before = self.before_timestamp
-        
-        if collection_progress:
-            # 恢复已收集的帖子ID集合
-            existing_ids = collection_progress.get('collected_post_ids', [])
-            collected_post_ids.update(existing_ids)
-            
-            # 使用before_timestamp作为起始点，避免漏掉同时间戳帖子
-            before = collection_progress.get('before_timestamp', self.before_timestamp)
-            latest_time = collection_progress.get('latest_post_timestamp', self.before_timestamp)
-            
-            logging.info(f"恢复URL收集进度: {len(collected_urls)}个帖子，{len(collected_post_ids)}个ID")
-            logging.info(f"从时间戳 {before} 继续，最新: {latest_time}")
-        else:
-            # 初始化时提取已有URL的ID
+        # 如果没有已收集的ID，从已有URL中提取
+        if not collected_post_ids and collected_urls:
             for url_data in collected_urls:
                 post_id = self._extract_post_id(url_data.get('url', ''))
                 if post_id:
                     collected_post_ids.add(post_id)
+            logging.info(f"从URL列表提取了 {len(collected_post_ids)} 个帖子ID")
         
-        return collected_urls, collected_post_ids, before
+        if collected_urls:
+            logging.info(f"继续收集: 已有 {len(collected_urls)} 个 URL，"
+                        f"从时间戳 {before_timestamp} 继续")
+        
+        return collected_urls, collected_post_ids, before_timestamp
 
     def _is_deleted_post(self, post):
         """检查帖子是否已被删除"""
@@ -226,7 +193,7 @@ class URLCollector:
         
         return new_count, duplicate_count, deleted_count
 
-    def collect_post_urls(self, existing_urls=None, collection_progress=None):
+    def collect_post_urls(self, existing_urls=None, before_timestamp=None, existing_post_ids=None):
         """收集帖子URL - 使用Pullpush API，支持断点续爬"""
         target_url = self.subreddit_url
         
@@ -240,10 +207,14 @@ class URLCollector:
             return []
         
         # 初始化收集状态
-        collected_urls, collected_post_ids, before = self._initialize_collection_state(
-            existing_urls, collection_progress)
+        collected_urls = existing_urls or []
+        collected_post_ids = existing_post_ids or set()
+        before = before_timestamp or self.before_timestamp
         
-        if not collection_progress:
+        collected_urls, collected_post_ids, before = self._initialize_collection_state(
+            collected_urls, before, collected_post_ids)
+        
+        if not existing_urls:
             logging.info(f"开始收集 r/{subreddit_name} 的帖子，目标数量: {self.max_posts}")
         
         consecutive_errors = 0
@@ -306,7 +277,7 @@ class URLCollector:
                     # 定期保存进度
                     if (len(collected_urls) - last_save_count >= 50 or 
                         len(collected_urls) % 250 == 0):
-                        self.save_url_collection_progress(collected_urls, before, self.max_posts)
+                        self.save_progress(collected_urls, before, collected_post_ids)
                         last_save_count = len(collected_urls)
                     
                     # 随机延迟避免被封
@@ -336,15 +307,14 @@ class URLCollector:
         
         except KeyboardInterrupt:
             logging.info("收集被中断，保存进度...")
-            self.save_url_collection_progress(collected_urls, before, self.max_posts)
+            self.save_progress(collected_urls, before, collected_post_ids)
             raise
         
         # 最终保存进度
         if len(collected_urls) != last_save_count or len(collected_urls) >= self.max_posts:
-            self.save_url_collection_progress(collected_urls, before, self.max_posts)
+            self.save_progress(collected_urls, before, collected_post_ids)
             status = "完成" if len(collected_urls) >= self.max_posts else "未完成"
-            logging.info(f"URL收集{status}: {len(collected_urls)}/{self.max_posts}，"
-                        f"去重后有效ID: {len(collected_post_ids)}")
+            logging.info(f"URL收集{status}: {len(collected_urls)}/{self.max_posts}")
         
         return collected_urls[:self.max_posts]
 
@@ -352,15 +322,15 @@ class URLCollector:
         """运行URL收集"""
         try:
             # 加载进度
-            existing_urls, is_collection_complete, collection_progress = self.load_progress()
+            collected_urls, before_timestamp, collected_post_ids, is_complete = self.load_progress()
             
-            if is_collection_complete:
-                logging.info(f"URL收集已完成，共 {len(existing_urls)} 个帖子")
+            if is_complete:
+                logging.info(f"URL收集已完成，共 {len(collected_urls)} 个帖子")
                 logging.info("如需重新收集，请删除状态文件后重试")
-                return existing_urls
+                return collected_urls
             
             # 继续或开始收集
-            url_list = self.collect_post_urls(existing_urls, collection_progress)
+            url_list = self.collect_post_urls(collected_urls, before_timestamp, collected_post_ids)
             
             if not url_list:
                 logging.error("未收集到任何帖子链接")

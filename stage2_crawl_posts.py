@@ -49,9 +49,14 @@ class PostCrawler:
         self.subreddit_dir = f".\\outputs\\{self.subreddit_name}"
         Path(self.subreddit_dir).mkdir(parents=True, exist_ok=True)
         
-        # 结果文件路径与爬取状态记录路径
+        # 结果文件路径
         self.output_file = os.path.join(self.subreddit_dir, f"{self.subreddit_name}_data.json")
-        self.state_file = os.path.join(self.subreddit_dir, f"{self.subreddit_name}_crawler_state.json")
+        
+        # URL列表文件（第一阶段生成，第二阶段只读）
+        self.urls_file = os.path.join(self.subreddit_dir, f"{self.subreddit_name}_urls.json")
+        
+        # 第二阶段爬取进度文件
+        self.progress_file = os.path.join(self.subreddit_dir, f"{self.subreddit_name}_crawl_progress.json")
         
         # 浏览器数据目录
         self.user_data_dir = self._get_browser_data_dir()
@@ -332,59 +337,81 @@ class PostCrawler:
             except:
                 pass
 
-    def update_progress_index(self, current_index):
-        """只更新当前处理索引（轻量级更新）"""
+    def _atomic_write_json(self, file_path, data, indent=2):
+        """原子写入JSON文件，避免中断时文件被截断"""
+        temp_file = file_path + ".tmp"
         try:
-            # 读取现有状态文件
-            if not os.path.exists(self.state_file):
-                logging.error("状态文件不存在，无法更新进度索引")
-                raise FileNotFoundError("状态文件不存在，无法更新进度索引")
-                
-            with open(self.state_file, 'r', encoding='utf-8') as f:
-                state_data = json.load(f)
-            
-            # 更新关键字段
-            state_data["current_post_index"] = current_index
-            state_data["total_crawled_count"] = self.total_crawled_count
-            state_data["last_updated"] = datetime.datetime.now().isoformat()
-            
-            # 写回文件
-            with open(self.state_file, 'w', encoding='utf-8') as f:
-                json.dump(state_data, f, ensure_ascii=False, indent=2)
-                
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=indent)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_file, file_path)
         except Exception as e:
-            logging.error(f"更新进度索引失败: {e}")
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
+            raise e
 
-    def load_progress(self) -> tuple:
-        """加载爬取进度"""
-        try:
-            if os.path.exists(self.state_file):
-                with open(self.state_file, 'r', encoding='utf-8') as f:
-                    state_data = json.load(f)
-                
-                current_index = state_data.get('current_post_index', 1)
-                url_list = state_data.get('collected_urls', [])
-                self.total_crawled_count = state_data.get('total_crawled_count', 0)
-                max_posts = state_data.get('max_posts', len(url_list))
-                
-                # 判断URL收集是否完成
-                is_collection_complete = len(url_list) >= max_posts
-                
-                if is_collection_complete:
-                    if current_index <= len(url_list):
-                        logging.info(f"恢复第二阶段进度: {current_index}/{len(url_list)}，"
-                                    f"已爬取 {self.total_crawled_count} 条帖子")
-                    else:
-                        logging.info(f"URL收集已完成，从第二阶段开始: 1/{len(url_list)}")
-                        current_index = 1
-                    return current_index, url_list, True
-                else:
-                    logging.error("URL收集未完成，请先运行第一阶段收集URL")
-                    return 1, [], False
-        except Exception as e:
-            logging.warning(f"加载进度失败: {e}")
+    def load_url_list(self):
+        """加载URL列表（第一阶段生成的索引文件，只读）"""
+        if not os.path.exists(self.urls_file):
+            logging.error(f"URL索引文件不存在: {self.urls_file}")
+            logging.error("请先运行第一阶段收集URL")
+            return None
         
-        return 1, [], False
+        try:
+            with open(self.urls_file, 'r', encoding='utf-8') as f:
+                urls_data = json.load(f)
+            
+            if not urls_data.get('is_complete', False):
+                logging.error("URL收集未完成，请先完成第一阶段")
+                return None
+            
+            url_list = urls_data.get('collected_urls', [])
+            if not url_list:
+                logging.error("URL列表为空")
+                return None
+            
+            logging.info(f"已加载URL索引: {len(url_list)} 个帖子")
+            return url_list
+            
+        except Exception as e:
+            logging.error(f"读取URL索引文件失败: {e}")
+            return None
+
+    def load_crawl_progress(self):
+        """加载爬取进度（当前爬到第几个）"""
+        if not os.path.exists(self.progress_file):
+            return 1, 0  # 从第1个开始，已爬取0条
+        
+        try:
+            with open(self.progress_file, 'r', encoding='utf-8') as f:
+                progress = json.load(f)
+            
+            current_index = progress.get('current_index', 1)
+            total_crawled = progress.get('total_crawled', 0)
+            
+            logging.info(f"恢复爬取进度: 第 {current_index} 个，已爬取 {total_crawled} 条")
+            return current_index, total_crawled
+            
+        except Exception as e:
+            logging.warning(f"读取进度文件失败: {e}，从头开始")
+            return 1, 0
+
+    def save_crawl_progress(self, current_index):
+        """保存爬取进度"""
+        try:
+            progress = {
+                "subreddit": self.subreddit_name,
+                "current_index": current_index,
+                "total_crawled": self.total_crawled_count,
+                "last_updated": datetime.datetime.now().isoformat()
+            }
+            self._atomic_write_json(self.progress_file, progress)
+        except Exception as e:
+            logging.error(f"保存进度失败: {e}")
 
     def save_data(self, current_index):
         """保存数据到JSON文件和SQLite数据库"""
@@ -420,8 +447,8 @@ class PostCrawler:
             # 清空已保存的数据，避免重复保存
             self.all_posts_data.clear()
 
-            # 更新进度索引 - 使用轻量级方法
-            self.update_progress_index(current_index)
+            # 保存爬取进度
+            self.save_crawl_progress(current_index)
             
         except Exception as e:
             logging.error(f"保存数据失败: {e}")
@@ -638,21 +665,23 @@ class PostCrawler:
         current_index = 1
         
         try:
-            # 加载进度
-            current_index, url_list, is_collection_complete = self.load_progress()
-            
-            if not is_collection_complete:
-                logging.error("URL收集未完成，请先运行 stage1_collect_urls.py 收集URL")
+            # 加载URL索引（只读）
+            url_list = self.load_url_list()
+            if not url_list:
                 return
             
-            if not url_list:
-                logging.error("未找到URL列表，请先运行第一阶段收集URL")
+            # 加载爬取进度
+            current_index, self.total_crawled_count = self.load_crawl_progress()
+            
+            # 检查进度是否超出范围
+            total_posts = len(url_list)
+            if current_index > total_posts:
+                logging.info("爬取已完成，如需重新爬取请删除进度文件")
                 return
             
             # 初始化浏览器
             await self.init_browser()
             
-            total_posts = len(url_list)
             logging.info(f"开始爬取 {total_posts} 个帖子，从第 {current_index} 个开始")
             
             # 遍历帖子获取详细数据
@@ -709,11 +738,11 @@ class PostCrawler:
             # 显示最终统计
             logging.info(f"爬取结束，本次运行总共爬取了 {self.total_crawled_count} 条帖子")
             
-            # 正常完成时清理状态文件
+            # 正常完成时清理进度文件
             if completed_normally:
                 try:
-                    os.remove(self.state_file)
-                    logging.info("任务完成，已清理状态文件")
+                    os.remove(self.progress_file)
+                    logging.info("任务完成，已清理爬取进度文件")
                 except:
                     pass
             
