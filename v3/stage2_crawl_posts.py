@@ -34,7 +34,8 @@ class PostCrawler:
 
     def __init__(self, subreddit_url, headless=False, 
                  use_system_browser='chrome', delays=None,
-                 start_index=None, end_index=None):
+                 start_index=None, end_index=None,
+                 rate_limit_requests=100, rate_limit_sleep=100):
 
         self.subreddit_url = subreddit_url
         self.headless = headless
@@ -43,6 +44,10 @@ class PostCrawler:
         # 区间爬取参数（0-based索引，包含边界）
         self.start_index = start_index  # None表示从头开始
         self.end_index = end_index      # None表示爬到末尾
+        
+        # 访问限流参数
+        self.rate_limit_requests = rate_limit_requests  # 每N次请求后休眠
+        self.rate_limit_sleep = rate_limit_sleep  # 休眠秒数
         
         self.delays = delays or {
             'page_min': 2000, 'page_max': 5000,
@@ -69,9 +74,6 @@ class PostCrawler:
         # 存储数据
         self.all_posts_data = []
         self.total_crawled_count = 0
-        
-        # 数据收集来源标识
-        self.collect_source = "pullpush"
         
         # SQLite数据库路径（全局唯一）
         self.db_path = "./outputs/reddit_posts.sqlite"
@@ -475,36 +477,72 @@ class PostCrawler:
             f"{self.subreddit_name}_crawl_progress_{range_suffix}.json"
         )
 
-    def load_crawl_progress(self):
-        """加载爬取进度（当前爬到第几个）"""
-        if not os.path.exists(self.progress_file):
-            return self.start_index, 0  # 从区间起点开始
-        
+    def _get_crawled_indexes_from_db(self):
+        """从数据库查询当前subreddit在指定区间内已爬取的所有index"""
+        crawled_indexes = set()
         try:
-            with open(self.progress_file, 'r', encoding='utf-8') as f:
-                progress = json.load(f)
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
             
-            # 验证进度文件的区间是否匹配
-            saved_start = progress.get('range_start')
-            saved_end = progress.get('range_end')
-            if saved_start != self.start_index or saved_end != self.end_index:
-                logging.warning(f"进度文件区间 [{saved_start}, {saved_end}] 与当前区间 [{self.start_index}, {self.end_index}] 不匹配，从区间起点开始")
-                return self.start_index, 0
+            # 查询该subreddit在区间内已爬取的index_in_list
+            cursor.execute('''
+                SELECT index_in_list FROM posts 
+                WHERE subreddit = ? 
+                AND index_in_list >= ? 
+                AND index_in_list <= ?
+            ''', (self.subreddit_name, self.start_index, self.end_index))
             
-            current_index = progress.get('current_index', self.start_index)
-            total_crawled = progress.get('total_crawled', 0)
+            rows = cursor.fetchall()
+            crawled_indexes = {row[0] for row in rows if row[0] is not None}
             
-            # 恢复时从下一个索引开始，避免重复爬取
-            next_index = current_index + 1
-            if next_index > self.end_index:
-                next_index = self.end_index + 1  # 已完成所有爬取
-            
-            logging.info(f"恢复爬取进度: 上次处理到索引 {current_index}，从索引 {next_index} 继续，已爬取 {total_crawled} 条")
-            return next_index, total_crawled
+            conn.close()
+            logging.info(f"数据库中区间 [{self.start_index}, {self.end_index}] 已爬取 {len(crawled_indexes)} 条记录")
             
         except Exception as e:
-            logging.warning(f"读取进度文件失败: {e}，从区间起点开始")
-            return self.start_index, 0
+            logging.warning(f"查询数据库已爬取记录失败: {e}")
+        
+        return crawled_indexes
+
+    def load_crawl_progress(self):
+        """加载爬取进度，以数据库实际爬取情况为准，返回未爬取的index列表"""
+        # 从数据库获取已爬取的index集合
+        crawled_indexes = self._get_crawled_indexes_from_db()
+        
+        # 计算区间内所有需要爬取的index
+        all_indexes_in_range = set(range(self.start_index, self.end_index + 1))
+        
+        # 找出未爬取的index（需要补爬的）
+        pending_indexes = sorted(all_indexes_in_range - crawled_indexes)
+        
+        # 已爬取数量以数据库为准
+        total_crawled = len(crawled_indexes)
+        
+        # 读取进度文件（仅用于日志对比）
+        if os.path.exists(self.progress_file):
+            try:
+                with open(self.progress_file, 'r', encoding='utf-8') as f:
+                    progress = json.load(f)
+                progress_crawled = progress.get('total_crawled', 0)
+                progress_index = progress.get('current_index', self.start_index)
+                
+                if progress_crawled != total_crawled:
+                    logging.warning(f"进度文件记录已爬取 {progress_crawled} 条，数据库实际 {total_crawled} 条，以数据库为准")
+                if progress_index < self.end_index and (progress_index + 1) in crawled_indexes:
+                    # 进度文件的下一个已经在数据库中，说明进度文件落后了
+                    logging.info(f"进度文件记录到索引 {progress_index}，但数据库显示更多记录已爬取")
+            except Exception as e:
+                logging.warning(f"读取进度文件失败: {e}")
+        
+        if not pending_indexes:
+            logging.info(f"区间 [{self.start_index}, {self.end_index}] 所有 {len(all_indexes_in_range)} 条记录均已爬取完成")
+        else:
+            logging.info(f"区间 [{self.start_index}, {self.end_index}] 共 {len(all_indexes_in_range)} 条，已爬取 {total_crawled} 条，待爬取 {len(pending_indexes)} 条")
+            if len(pending_indexes) <= 20:
+                logging.info(f"待爬取索引: {pending_indexes}")
+            else:
+                logging.info(f"待爬取索引(前20个): {pending_indexes[:20]}...")
+        
+        return pending_indexes, total_crawled
 
     def save_crawl_progress(self, current_index):
         """保存爬取进度"""
@@ -522,35 +560,19 @@ class PostCrawler:
             logging.error(f"保存进度失败: {e}")
 
     def save_data(self, current_index):
-        """保存数据到JSON文件和SQLite数据库"""
+        """保存数据到SQLite数据库"""
         try:
             # 如果没有新数据需要保存，直接返回
             if not self.all_posts_data:
                 return
             
-            # ========== 保存到JSON文件 ==========
-            # 读取现有数据
-            existing_data = []
-            if os.path.exists(self.output_file):
-                try:
-                    with open(self.output_file, 'r', encoding='utf-8') as f:
-                        existing_data = json.load(f)
-                except Exception:
-                    pass
-            
-            # 合并数据
-            all_data = existing_data + self.all_posts_data
-            
-            with open(self.output_file, 'w', encoding='utf-8') as f:
-                json.dump(all_data, f, ensure_ascii=False, indent=4)
-            
-            # ========== 保存到SQLite数据库 ==========
+            # 保存到SQLite数据库
             self._save_to_sqlite(self.all_posts_data)
             
             # 更新总计数器
             self.total_crawled_count += len(self.all_posts_data)
             
-            logging.info(f"保存数据成功，新增 {len(self.all_posts_data)} 条，JSON文件总计 {len(all_data)} 条，本次运行已爬取 {self.total_crawled_count} 条帖子")
+            logging.info(f"保存数据成功，新增 {len(self.all_posts_data)} 条，本次运行已爬取 {self.total_crawled_count} 条帖子")
             
             # 清空已保存的数据，避免重复保存
             self.all_posts_data.clear()
@@ -586,7 +608,7 @@ class PostCrawler:
                     post.get("index", 0),  # index_in_list
                     post_id,  # post_id
                     post.get("subreddit", self.subreddit_name),  # subreddit
-                    self.collect_source,  # collect_source
+                    post.get("collect_source", "unknown"),  # collect_source
                     post.get("url", ""),  # url
                     post.get("title", ""),  # title
                     post.get("body", ""),  # body
@@ -649,7 +671,7 @@ class PostCrawler:
         else:
             logging.info(f"SQLite: 新增 {inserted_count} 条")
 
-    async def fetch_post_json(self, post_url, url_index):
+    async def fetch_post_json(self, post_url, url_index, source="unknown"):
         """获取单个帖子的JSON数据"""
         try:
             # 构造JSON API URL
@@ -682,6 +704,7 @@ class PostCrawler:
                 "post_id": self._extract_post_id(post_url),
                 "url": post_url,
                 "subreddit": post_info.get("subreddit", ""),
+                "collect_source": source,
                 "title": post_info.get("title", "N/A"),
                 "body": post_info.get("selftext", ""),
                 "author": post_info.get("author", "[deleted]"),
@@ -810,7 +833,7 @@ class PostCrawler:
     async def crawl_posts(self):
         """主要爬取流程"""
         completed_normally = False
-        current_index = 1
+        current_index = self.start_index
         
         try:
             # 加载URL索引（只读）
@@ -818,58 +841,76 @@ class PostCrawler:
             if not url_list:
                 return
             
-            # 加载爬取进度
-            current_index, self.total_crawled_count = self.load_crawl_progress()
+            # 加载爬取进度，获取待爬取的index列表
+            pending_indexes, self.total_crawled_count = self.load_crawl_progress()
             
-            # 计算区间内的帖子数量
-            range_count = self.end_index - self.start_index + 1
-            
-            # 检查进度是否超出区间范围
-            if current_index > self.end_index:
-                logging.info(f"区间 [{self.start_index}, {self.end_index}] 爬取已完成，如需重新爬取请删除进度文件")
+            # 检查是否还有待爬取的帖子
+            if not pending_indexes:
+                logging.info(f"区间 [{self.start_index}, {self.end_index}] 爬取已完成，无需补爬")
                 return
             
             # 初始化浏览器
             await self.init_browser()
             
-            logging.info(f"开始爬取区间 [{self.start_index}, {self.end_index}] 共 {range_count} 个帖子，从索引 {current_index} 开始")
+            total_pending = len(pending_indexes)
+            logging.info(f"开始爬取区间 [{self.start_index}, {self.end_index}]，待爬取 {total_pending} 个帖子")
             
-            # 遍历帖子获取详细数据
+            # 遍历待爬取的index列表
             consecutive_failures = 0
+            crawled_this_session = 0
+            request_counter = 0  # 请求计数器，用于限流
             
-            for index in range(current_index, self.end_index + 1):
+            for i, index in enumerate(pending_indexes):
                 url_item = url_list[index]
                 url = url_item["url"]
+                source = url_item.get("source", "unknown")
                 current_index = index
                 
-                logging.info(f"[{current_index}/{self.end_index}] (区间{self.start_index}-{self.end_index}) 处理: {url}")
+                logging.info(f"[{i+1}/{total_pending}] 索引 {index} (区间{self.start_index}-{self.end_index}) 处理: {url}")
                                 
                 try:
-                    post_data = await self.fetch_post_json(url, index)
+                    post_data = await self.fetch_post_json(url, index, source)
+                    request_counter += 1  # 每次请求后计数器加1
+                    
+                    # 检查是否需要限流休眠
+                    if self.rate_limit_requests > 0 and request_counter >= self.rate_limit_requests:
+                        logging.info(f"已完成 {request_counter} 次请求，休眠 {self.rate_limit_sleep} 秒以避免限流...")
+                        await asyncio.sleep(self.rate_limit_sleep)
+                        request_counter = 0  # 重置计数器
+                        logging.info("休眠结束，继续爬取")
                     
                     if post_data:
                         self.all_posts_data.append(post_data)
                         consecutive_failures = 0
-                        # 每10个帖子保存一次数据，传递当前索引（保存已处理的索引）
+                        crawled_this_session += 1
+                        # 每10个帖子保存一次数据
                         if len(self.all_posts_data) % 10 == 0:
                             self.save_data(current_index)
                     else:
                         consecutive_failures += 1
-                        if consecutive_failures >= 3:
+                        logging.warning(f"索引 {index} 爬取失败，将在下次运行时重试")
+                        if consecutive_failures >= 5:
                             logging.error("连续失败过多，停止爬取")
                             break
                     
+                    # 检查是否需要限流休眠
+                    if self.rate_limit_requests > 0 and request_counter >= self.rate_limit_requests:
+                        logging.info(f"已完成 {request_counter} 次请求，休眠 {self.rate_limit_sleep} 秒以避免限流...")
+                        await asyncio.sleep(self.rate_limit_sleep)
+                        request_counter = 0  # 重置计数器
+                        logging.info("休眠结束，继续爬取")
+                    
                 except Exception as e:
                     consecutive_failures += 1
-                    logging.error(f"处理帖子出错: {e}")
-                    if consecutive_failures >= 3:
+                    logging.error(f"处理帖子出错 (索引 {index}): {e}")
+                    if consecutive_failures >= 5:
                         break
                     await self.page.wait_for_timeout(random.randint(self.delays['action_min'], self.delays['action_max']))
             
-            # 检查是否正常完成
-            if current_index >= self.end_index:
+            # 检查是否正常完成（所有待爬取的都处理完了）
+            if i == total_pending - 1 and consecutive_failures < 5:
                 completed_normally = True
-                logging.info(f"区间 [{self.start_index}, {self.end_index}] 所有帖子处理完成")
+                logging.info(f"区间 [{self.start_index}, {self.end_index}] 本次待爬取的 {total_pending} 个帖子全部处理完成")
             
         except KeyboardInterrupt:
             logging.info("用户中断，进度已保存")
@@ -881,7 +922,7 @@ class PostCrawler:
                 self.save_data(current_index)
             
             # 显示最终统计
-            logging.info(f"爬取结束，本次运行总共爬取了 {self.total_crawled_count} 条帖子")
+            logging.info(f"爬取结束，本次运行爬取了 {self.total_crawled_count} 条帖子")
             
             # 完成后保留进度文件，方便查看爬取状态
             if completed_normally:
@@ -909,11 +950,13 @@ async def main():
         use_system_browser=use_system_browser,
         start_index=start_index,
         end_index=end_index,
+        rate_limit_requests=100,  # 每100次请求后休眠
+        rate_limit_sleep=360,  # 休眠时间经过开发者模式获取到的响应头估计，是360秒
         delays={
             'page_min': 3000, 'page_max': 5000,
             'action_min': 3000, 'action_max': 8000,
             'scroll_min': 5000, 'scroll_max': 10000,
-            'api_min': 2000, 'api_max': 5000
+            'api_min': 100, 'api_max': 500
         }
     )
     

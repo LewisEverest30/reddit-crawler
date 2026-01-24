@@ -30,12 +30,13 @@ def setup_logger(debug=False):
 class URLCollector:
     """第一阶段：收集Reddit帖子URL"""
 
-    def __init__(self, subreddit_url, max_posts=100, before_timestamp=None, api_delay=None, api_page_size=100):
+    def __init__(self, subreddit_url, max_posts=100, before_timestamp=None, api_delay=None, api_page_size=100, source=None):
         self.subreddit_url = subreddit_url
         self.max_posts = max_posts
         self.before_timestamp = before_timestamp or int(time.time())
         self.api_delay = api_delay or {'min': 2, 'max': 5}
         self.default_page_size = api_page_size
+        self.source = source or "pullpush"
 
         # 提取subreddit名称并创建目录
         self.subreddit_name = self._extract_subreddit_name(subreddit_url)
@@ -185,7 +186,8 @@ class URLCollector:
             post_url = f"https://www.reddit.com{permalink}"
             collected_urls.append({
                 "url": post_url,
-                "created_utc": created_utc
+                "created_utc": created_utc,
+                "source": self.source
             })
             scanned_post_ids.add(post_id)
             new_count += 1
@@ -351,7 +353,10 @@ def main():
     setup_logger()
     
     # 配置参数
-    target_url = "https://www.reddit.com/r/dogs/"
+    # target_url = "https://www.reddit.com/r/dogs/"
+    target_url = "https://www.reddit.com/r/DOG/"
+    target_url = "https://www.reddit.com/r/Dogowners/"
+
     max_posts = 50000
     
     collector = URLCollector(
@@ -359,7 +364,8 @@ def main():
         max_posts=max_posts,
         before_timestamp=int(datetime.datetime(2026, 1, 22).timestamp()),
         api_delay={'min': 1.5, 'max': 3},
-        api_page_size=100
+        api_page_size=100,
+        source="pullpush"
     )
     
     url_list = collector.run()
