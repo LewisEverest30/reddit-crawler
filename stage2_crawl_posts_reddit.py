@@ -125,7 +125,8 @@ class PostCrawler:
                     author_patreon_flair INTEGER,
                     comments TEXT,
                     crawled_at TEXT,
-                    is_valid INTEGER DEFAULT 1
+                    is_valid INTEGER DEFAULT 1,
+                    llm_analyze_result TEXT
                 )
             ''')
             logging.info("创建新的posts表")
@@ -149,6 +150,14 @@ class PostCrawler:
                     logging.info("添加is_valid列到posts表")
                 except sqlite3.OperationalError as e:
                     logging.warning(f"添加is_valid列失败: {e}")
+            
+            # 添加llm_analyze_result列（如果不存在）
+            if 'llm_analyze_result' not in existing_columns:
+                try:
+                    cursor.execute('ALTER TABLE posts ADD COLUMN llm_analyze_result TEXT')
+                    logging.info("添加llm_analyze_result列到posts表")
+                except sqlite3.OperationalError as e:
+                    logging.warning(f"添加llm_analyze_result列失败: {e}")
         
         # 创建索引以提高查询效率
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_subreddit ON posts(subreddit)')
@@ -951,12 +960,12 @@ async def main():
         start_index=start_index,
         end_index=end_index,
         rate_limit_requests=100,  # 每100次请求后休眠
-        rate_limit_sleep=380,  # 休眠时间经过开发者模式获取到的响应头估计，是380秒
+        rate_limit_sleep=400,  # 休眠时间经过开发者模式获取到的响应头估计
         delays={
             'page_min': 3000, 'page_max': 5000,
             'action_min': 3000, 'action_max': 8000,
             'scroll_min': 5000, 'scroll_max': 10000,
-            'api_min': 100, 'api_max': 500
+            'api_min':500, 'api_max': 500
         }
     )
     

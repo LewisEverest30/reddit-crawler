@@ -1,6 +1,6 @@
 # coding=utf-8
 """
-Reddit爬虫 - 第二阶段：使用Playwright爬取帖子详细内容
+Reddit爬虫 - 第二阶段:使用PullPush API获取帖子详细内容
 """
 import json
 import logging
@@ -11,8 +11,8 @@ import re
 import datetime
 import time
 import sqlite3
+import requests
 from pathlib import Path
-from playwright.async_api import async_playwright
 
 
 def setup_logger(debug=False):
@@ -30,30 +30,23 @@ def setup_logger(debug=False):
 
 
 class PostCrawler:
-    """第二阶段：使用Playwright爬取帖子详细内容"""
+    """第二阶段：使用PullPush API获取帖子详细内容"""
 
-    def __init__(self, subreddit_url, headless=False, 
-                 use_system_browser='chrome', delays=None,
-                 start_index=None, end_index=None,
-                 rate_limit_requests=100, rate_limit_sleep=100):
+    def __init__(self, subreddit_url, delays=None,
+                 start_index=None, end_index=None):
 
         self.subreddit_url = subreddit_url
-        self.headless = headless
-        self.use_system_browser = use_system_browser
         
         # 区间爬取参数（0-based索引，包含边界）
-        self.start_index = start_index  # None表示从头开始
-        self.end_index = end_index      # None表示爬到末尾
+        self.start_index = start_index
+        self.end_index = end_index
         
-        # 访问限流参数
-        self.rate_limit_requests = rate_limit_requests  # 每N次请求后休眠
-        self.rate_limit_sleep = rate_limit_sleep  # 休眠秒数
-        
+        # API请求延迟配置（毫秒）
         self.delays = delays or {
-            'page_min': 2000, 'page_max': 5000,
-            'action_min': 500, 'action_max': 1500,
-            'scroll_min': 3000, 'scroll_max': 6000,
-            'api_min': 1000, 'api_max': 2000
+            'api_min': 100,
+            'api_max': 500,
+            'retry_min': 1000,
+            'retry_max': 3000
         }
         
         # 提取subreddit名称并创建目录
@@ -68,9 +61,6 @@ class PostCrawler:
         self.output_file = None
         self.progress_file = None
         
-        # 浏览器数据目录
-        self.user_data_dir = self._get_browser_data_dir()
-        
         # 存储数据
         self.all_posts_data = []
         self.total_crawled_count = 0
@@ -79,11 +69,6 @@ class PostCrawler:
         self.db_path = "./outputs/reddit_posts.sqlite"
         Path("./outputs").mkdir(parents=True, exist_ok=True)
         self._init_database()
-        
-        # Playwright对象
-        self.playwright = None
-        self.browser = None
-        self.page = None
 
     def _init_database(self):
         """初始化SQLite数据库"""
@@ -125,7 +110,8 @@ class PostCrawler:
                     author_patreon_flair INTEGER,
                     comments TEXT,
                     crawled_at TEXT,
-                    is_valid INTEGER DEFAULT 1
+                    is_valid INTEGER DEFAULT 1,
+                    llm_analyze_result TEXT
                 )
             ''')
             logging.info("创建新的posts表")
@@ -149,6 +135,14 @@ class PostCrawler:
                     logging.info("添加is_valid列到posts表")
                 except sqlite3.OperationalError as e:
                     logging.warning(f"添加is_valid列失败: {e}")
+            
+            # 添加llm_analyze_result列（如果不存在）
+            if 'llm_analyze_result' not in existing_columns:
+                try:
+                    cursor.execute('ALTER TABLE posts ADD COLUMN llm_analyze_result TEXT')
+                    logging.info("添加llm_analyze_result列到posts表")
+                except sqlite3.OperationalError as e:
+                    logging.warning(f"添加llm_analyze_result列失败: {e}")
         
         # 创建索引以提高查询效率
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_subreddit ON posts(subreddit)')
@@ -164,242 +158,6 @@ class PostCrawler:
         """从Reddit URL中提取subreddit名称"""
         match = re.search(r'/r/([^/]+)', url)
         return match.group(1) if match else "unknown_subreddit"
-    
-    def _get_browser_data_dir(self):
-        """获取浏览器数据目录"""
-        if self.use_system_browser:
-            data_dir = f"./browser_data_{self.use_system_browser}"
-        else:
-            data_dir = "./browser_data"
-        Path(data_dir).mkdir(parents=True, exist_ok=True)
-        return data_dir
-
-    async def init_browser(self):
-        """初始化浏览器"""
-        self.playwright = await async_playwright().start()
-        
-        # 确定浏览器channel
-        channel = None
-        if self.use_system_browser:
-            if self.use_system_browser.lower() == 'chrome':
-                channel = 'chrome'
-            elif self.use_system_browser.lower() in ['edge', 'msedge']:
-                channel = 'msedge'
-        
-        self.browser = await self.playwright.chromium.launch_persistent_context(
-            user_data_dir=self.user_data_dir,
-            headless=self.headless,
-            channel=channel,
-            viewport={'width': 1920, 'height': 1080},
-            args=[
-                '--no-sandbox',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-dev-shm-usage',
-                '--no-first-run',
-                '--disable-notifications',
-                '--disable-infobars',
-            ]
-        )
-        
-        # 反自动化检测
-        await self.browser.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            delete navigator.__proto__.webdriver;
-        """)
-        
-        self.page = await self.browser.new_page()
-
-    async def _check_and_handle_captcha_or_login(self, current_url=None):
-        """检测CAPTCHA或登录验证并等待手动处理"""
-        try:
-            # 检测常见的CAPTCHA元素
-            captcha_selectors = [
-                '[data-testid="captcha"]',  # Reddit specific
-                '.g-recaptcha',  # Google reCAPTCHA
-                '#recaptcha',
-                '[class*="captcha"]',
-                '[id*="captcha"]',
-                'iframe[src*="recaptcha"]',
-                'iframe[src*="captcha"]',
-                '[aria-label*="captcha"]',
-                '[aria-label*="verification"]'
-            ]
-            captcha_found = False
-            for selector in captcha_selectors:
-                try:
-                    elements = await self.page.query_selector_all(selector)
-                    if elements:
-                        # 检查元素是否可见
-                        for element in elements:
-                            is_visible = await element.is_visible()
-                            if is_visible:
-                                captcha_found = True
-                                break
-                    if captcha_found:
-                        break
-                except Exception:
-                    # 如果页面上下文失效，跳过这个检测
-                    continue
-
-            # 也检查页面文本中是否包含验证以及登录相关内容
-            if not captcha_found:
-                # 检查页面是否包含正常的Reddit数据结构，如果有就跳过验证检测
-                try:
-                    json_element = await self.page.query_selector("pre")
-                    if json_element:
-                        json_string = await json_element.text_content()
-                        if json_string and "title" in json_string \
-                            and "author" in json_string \
-                            and "selftext" in json_string:
-                            return
-                    else:
-                        # 页面没有找到pre元素，记录详细信息
-                        current_page_url = self.page.url
-                        try:
-                            page_title = await self.page.title()
-                            page_content = await self.page.content()
-                            page_text = await self.page.locator('body').text_content()
-                            
-                            logging.warning(f"页面缺少JSON结构 - URL: {current_page_url}")
-                            logging.warning(f"页面标题: {page_title}")
-                            logging.warning(f"页面文本长度: {len(page_text) if page_text else 0}")
-                            
-                            # 记录页面HTML的前2000字符
-                            if page_content:
-                                logging.info(f"页面HTML前2000字符: {page_content[:2000]}")
-                            
-                            # 记录页面可见文本的前1000字符
-                            if page_text:
-                                logging.info(f"页面可见文本前1000字符: {page_text[:1000]}")
-                                
-                        except Exception as e:
-                            logging.error(f"记录页面详细信息失败: {e}")
-                except Exception as e:
-                    logging.warning(f"检查JSON结构时出错: {e}")
-                
-                try:
-                    page_text = await self.page.locator('body').text_content()
-                    if page_text:
-                        captcha_keywords = ['captcha', 'verification', 'prove you are human', 'robot check', 'login', 'sign in', '登录']
-                        page_text_lower = page_text.lower()
-                        for keyword in captcha_keywords:
-                            if keyword in page_text_lower:
-                                captcha_found = True
-                                logging.warning(f"在页面文本中发现验证关键词: {keyword}")
-                                break
-                except Exception:
-                    pass
-            
-            if captcha_found:
-                logging.warning("检测到CAPTCHA或登录验证！程序已暂停，请手动完成验证或登录")
-                logging.warning("完成后，请在此命令行输入 'c' 然后按回车键继续程序")
-                # 等待用户输入
-                while True:
-                    try:
-                        user_input = input("请输入 'c' 继续: ").strip().lower()
-                        if user_input == 'c':
-                            logging.info("继续执行程序...")
-                            break
-                        else:
-                            print("请输入 'c' 来继续程序")
-                    except KeyboardInterrupt:
-                        logging.info("用户中断程序")
-                        raise
-                    except Exception as e:
-                        logging.warning(f"输入处理错误: {e}")
-                        continue
-                
-                # 用户处理完验证后，重新导航到当前页面以恢复上下文
-                if current_url:
-                    try:
-                        logging.info("重新加载页面以恢复上下文...")
-                        await self.page.goto(current_url, wait_until='domcontentloaded', timeout=30000)
-                        await self.page.wait_for_timeout(random.randint(self.delays['page_min'], self.delays['page_max']))
-                    except Exception as e:
-                        logging.warning(f"重新加载页面失败: {e}")
-                        
-        except Exception as e:
-            logging.error(f"CAPTCHA检测时出错: {e}")
-
-    async def _simulate_human_browse_a_post_behavior(self, random_rate=0.2):
-        """模拟人类浏览行为 - 随机点击帖子并浏览"""
-        if random.random() >= random_rate:
-            return
-        logging.info("触发模拟浏览行为")
-        try:
-            # 一次性筛选出视口内有效的链接
-            links = await self.page.query_selector_all('a[href*="/comments/"]:not([data-testid*="ad"]):not([data-adtype])')
-            viewport_links = []
-            
-            for link in links:
-                try:
-                    href = await link.get_attribute("href")
-                    if not href or "/user/" in href:
-                        continue
-                    
-                    # 补全相对URL并验证格式
-                    if href.startswith('/'):
-                        href = "https://www.reddit.com" + href
-                    if not re.match(r'https://www\.reddit\.com/r/[^/]+/comments/[a-zA-Z0-9]+/[^/]+/?$', href):
-                        continue
-                    
-                    # 检查是否在视口内且可见
-                    if await link.is_visible():
-                        in_viewport = await link.evaluate('''
-                            element => {
-                                const rect = element.getBoundingClientRect();
-                                return rect.bottom > 0 && rect.top < window.innerHeight && 
-                                       rect.right > 0 && rect.left < window.innerWidth;
-                            }
-                        ''')
-                        if in_viewport:
-                            viewport_links.append((link, href))
-                except Exception:
-                    continue
-            
-            if not viewport_links:
-                return
-            
-            # 选择并点击链接
-            chosen_link, href = viewport_links[-1]
-            logging.info(f"选择链接进行模拟浏览{href}")
-            
-            if not await chosen_link.is_enabled():
-                logging.info("选择的链接不可点击")
-                return
-            
-            # 执行点击、浏览、返回流程
-            await chosen_link.scroll_into_view_if_needed()
-            await self.page.wait_for_timeout(self.delays['action_min'])
-            await chosen_link.click(force=True)
-            await self.page.wait_for_load_state('domcontentloaded', timeout=10000)
-            await self.page.wait_for_timeout(random.randint(self.delays['page_min'], self.delays['page_max']))
-            
-            if "/comments/" not in self.page.url:
-                logging.info(f"点击后未跳转到正确页面: {self.page.url}")
-                return
-            
-            # 模拟浏览
-            for _ in range(random.randint(1, 3)):
-                scroll_distance = random.randint(200, 5000)
-                direction = 1 if random.random() < 0.8 else -1
-                await self.page.evaluate(f"window.scrollBy(0, {scroll_distance * direction});")
-                await self.page.wait_for_timeout(random.randint(self.delays['action_min'], self.delays['action_max']))
-            
-            # 返回列表页
-            logging.info("返回列表页")
-            await self.page.go_back()
-            await self.page.wait_for_load_state('domcontentloaded')
-            await self.page.wait_for_timeout(random.randint(self.delays['page_min'], self.delays['page_max']))
-            
-        except Exception as e:
-            logging.info(f"模拟浏览行为时出错: {e}")
-            try:
-                if '/comments/' in self.page.url:
-                    await self.page.go_back()
-                    await self.page.wait_for_load_state('domcontentloaded')
-            except:
-                pass
 
     def _atomic_write_json(self, file_path, data, indent=2):
         """原子写入JSON文件，避免中断时文件被截断"""
@@ -672,36 +430,37 @@ class PostCrawler:
             logging.info(f"SQLite: 新增 {inserted_count} 条")
 
     async def fetch_post_json(self, post_url, url_index, source="unknown"):
-        """获取单个帖子的JSON数据"""
+        """使用PullPush API获取单个帖子的JSON数据"""
         try:
-            # 构造JSON API URL
-            base_url = post_url.split('?')[0]
-            json_url = base_url.rstrip('/') + ".json"
-            
-            await self.page.goto(json_url, wait_until='domcontentloaded', timeout=15000)
-            await self.page.wait_for_timeout(random.randint(self.delays['api_min'], self.delays['api_max']))
-            
-            # 检查CAPTCHA或登录验证
-            await self._check_and_handle_captcha_or_login(json_url)
-            
-            # 获取JSON内容
-            pre_element = await self.page.query_selector("pre")
-            if not pre_element:
-                return None
-                
-            json_content = await pre_element.text_content()
-            if not json_content:
+            post_id = self._extract_post_id(post_url)
+            if not post_id:
+                logging.error(f"无法从URL提取post_id: {post_url}")
                 return None
             
-            # 解析JSON
-            raw_data = json.loads(json_content)
-            post_info = raw_data[0]['data']['children'][0]['data']
-            comments_tree = raw_data[1]['data']['children']
+            # 步骤1: 获取帖子详情
+            await asyncio.sleep(random.uniform(self.delays['api_min'] / 1000, self.delays['api_max'] / 1000))
+            submission_url = f"https://api.pullpush.io/reddit/search/submission/?ids={post_id}"
             
+            resp = requests.get(submission_url, timeout=30)
+            resp.raise_for_status()
+            submission_data = resp.json().get('data', [])
+            
+            if not submission_data:
+                logging.error(f"未找到帖子数据 (post_id={post_id})")
+                return None
+            
+            post_info = submission_data[0]
+            logging.info(f"获取到帖子 [{post_id}]: {post_info.get('title', 'N/A')[:50]}...")
+            
+            # 步骤2: 获取评论
+            all_comments = await self._fetch_all_comments_from_pullpush(post_id)
+            total_comments_count = self._count_comments_recursively(all_comments)
+            logging.info(f"获取到评论，评论数: 根评论 {len(all_comments)}，总计（含回复） {total_comments_count}")
+
             # 提取帖子数据
             post_data = {
                 "index": url_index,
-                "post_id": self._extract_post_id(post_url),
+                "post_id": post_id,
                 "url": post_url,
                 "subreddit": post_info.get("subreddit", ""),
                 "collect_source": source,
@@ -712,7 +471,7 @@ class PostCrawler:
                 "score": post_info.get("score", 0),
                 "upvote_ratio": post_info.get("upvote_ratio", 0.0),
                 "num_comments": post_info.get("num_comments", 0),
-                "num_comments_filtered": 0,  # 稍后计算
+                "num_comments_filtered": total_comments_count,
                 "num_crossposts": post_info.get("num_crossposts", 0),
                 "total_awards_received": post_info.get("total_awards_received", 0),
                 "pinned": post_info.get("pinned", False),
@@ -725,33 +484,92 @@ class PostCrawler:
                 "user_reports": post_info.get("user_reports", []),
                 "mod_reports": post_info.get("mod_reports", []),
                 "author_patreon_flair": post_info.get("author_patreon_flair", 0),
-                "comments": [],
+                "comments": all_comments,
                 "is_valid": self._is_post_valid(post_info.get("title", ""))
             }
-            
-            # 解析评论
-            for comment_node in comments_tree:
-                parsed_comment = self._parse_comment(comment_node)
-                if parsed_comment:
-                    post_data["comments"].append(parsed_comment)
-            
-            # 计算过滤后的评论总数（包括所有层级的回复）
-            post_data["num_comments_filtered"] = self._count_comments(post_data["comments"])
-            
+                        
             return post_data
             
+        except requests.RequestException as e:
+            logging.error(f"PullPush API请求失败 (post_id={post_id}): {e}")
+            return None
         except Exception as e:
             logging.error(f"获取帖子JSON失败: {e}")
             return None
 
-    def _count_comments(self, comments):
+    def _count_comments_recursively(self, comments):
         """递归统计评论总数（包括所有层级的回复）"""
         count = 0
         for comment in comments:
-            count += 1  # 当前评论
+            count += 1
             if comment.get("replies"):
-                count += self._count_comments(comment["replies"])
+                count += self._count_comments_recursively(comment["replies"])
         return count
+
+    async def _fetch_all_comments_from_pullpush(self, post_id):
+        """从PullPush API获取帖子评论（按score降序）"""
+        flat_comments = []
+        params = {
+            "link_id": post_id,
+            "size": 500,
+            "sort": "desc",
+            "sort_type": "score"
+        }
+        
+        try:
+            await asyncio.sleep(random.uniform(self.delays['api_min'] / 1000, self.delays['api_max'] / 1000))
+            resp = requests.get("https://api.pullpush.io/reddit/search/comment/", params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json().get('data', [])
+            
+            if not data:
+                return []
+            
+            # 过滤并解析评论
+            for comment_data in data:
+                parsed = self._parse_pullpush_comment(comment_data, include_ids=True)
+                if parsed:
+                    flat_comments.append(parsed)
+            
+            # 构建树形结构
+            return self._build_comment_tree(flat_comments, post_id)
+            
+        except requests.RequestException as e:
+            logging.error(f"评论抓取失败: {e}")
+        except Exception as e:
+            logging.error(f"评论解析失败: {e}")
+        
+        return []
+
+    def _parse_pullpush_comment(self, comment_data, include_ids=False):
+        """解析PullPush API返回的评论数据（扁平结构）"""
+        try:
+            author = comment_data.get("author", "[deleted]")
+            body = comment_data.get("body", "")
+            
+            # 过滤版主/机器人/删除的评论
+            if self._is_bot_or_mod_comment_or_deleted(author, body):
+                return None
+            
+            parsed = {
+                "author": author,
+                "text": body if body else "[无文本]",
+                "score": comment_data.get("score", 0),
+                "created_time": self._convert_time(comment_data.get("created_utc", 0)),
+                "replies": [],
+                "reply_count": 0
+            }
+            
+            # 如果需要构建树形结构，保存ID信息
+            if include_ids:
+                parsed["comment_id"] = comment_data.get("id", "")
+                parsed["parent_id"] = comment_data.get("parent_id", "")
+            
+            return parsed
+            
+        except Exception as e:
+            logging.debug(f"解析评论失败: {e}")
+            return None
 
     def _is_bot_or_mod_comment_or_deleted(self, author, body):
         """判断是否为版主/机器人评论或已删除评论"""
@@ -766,41 +584,55 @@ class PostCrawler:
         
         return False
 
-    def _parse_comment(self, comment_data):
-        """解析评论数据"""
-        if comment_data.get('kind') == 'more':
-            return None
-
-        data = comment_data.get('data', {})
+    def _build_comment_tree(self, flat_comments, post_id):
+        """将扁平化的评论列表构建成树形结构"""
+        comment_dict = {}
+        root_comments = []
         
-        # 过滤版主/机器人评论
-        author = data.get("author", "[deleted]")
-        body = data.get("body", "")
-        if self._is_bot_or_mod_comment_or_deleted(author, body):
-            return None
+        # 创建所有评论节点
+        for comment in flat_comments:
+            comment_id = comment.get("comment_id")
+            if not comment_id:
+                continue
+                
+            comment_dict[comment_id] = {
+                "data": {
+                    "author": comment["author"],
+                    "text": comment["text"],
+                    "score": comment["score"],
+                    "created_time": comment["created_time"],
+                    "replies": [],
+                    "reply_count": 0
+                },
+                "parent_id": comment.get("parent_id", "")
+            }
         
-        utc_timestamp = data.get("created_utc", 0)
+        # 建立父子关系
+        for comment_id, comment_info in comment_dict.items():
+            parent_id = comment_info["parent_id"]
+            
+            if parent_id.startswith("t3_"):
+                # 直接回复帖子
+                root_comments.append(comment_info["data"])
+            elif parent_id.startswith("t1_"):
+                # 回复评论
+                parent_comment_id = parent_id[3:]
+                if parent_comment_id in comment_dict:
+                    comment_dict[parent_comment_id]["data"]["replies"].append(comment_info["data"])
+                else:
+                    # 父评论被过滤，作为根评论
+                    root_comments.append(comment_info["data"])
         
-        parsed = {
-            "author": author,
-            "text": body if body else "[无文本]",
-            "score": data.get("score", 0),
-            "created_time": self._convert_time(utc_timestamp),
-            "replies": [],
-            "reply_count": 0
-        }
-
-        # 递归处理回复
-        replies_raw = data.get("replies")
-        if isinstance(replies_raw, dict):
-            children = replies_raw.get('data', {}).get('children', [])
-            for child in children:
-                child_parsed = self._parse_comment(child)
-                if child_parsed:
-                    parsed["replies"].append(child_parsed)
-
-        parsed["reply_count"] = len(parsed["replies"])
-        return parsed
+        # 递归更新reply_count
+        def update_counts(comment):
+            comment["reply_count"] = len(comment["replies"])
+            for reply in comment["replies"]:
+                update_counts(reply)
+        
+        for comment in root_comments:
+            update_counts(comment)
+        
+        return root_comments
 
     def _convert_time(self, timestamp):
         """转换时间戳为可读格式"""
@@ -849,16 +681,12 @@ class PostCrawler:
                 logging.info(f"区间 [{self.start_index}, {self.end_index}] 爬取已完成，无需补爬")
                 return
             
-            # 初始化浏览器
-            await self.init_browser()
-            
             total_pending = len(pending_indexes)
             logging.info(f"开始爬取区间 [{self.start_index}, {self.end_index}]，待爬取 {total_pending} 个帖子")
             
             # 遍历待爬取的index列表
             consecutive_failures = 0
             crawled_this_session = 0
-            request_counter = 0  # 请求计数器，用于限流
             
             for i, index in enumerate(pending_indexes):
                 url_item = url_list[index]
@@ -870,14 +698,6 @@ class PostCrawler:
                                 
                 try:
                     post_data = await self.fetch_post_json(url, index, source)
-                    request_counter += 1  # 每次请求后计数器加1
-                    
-                    # 检查是否需要限流休眠
-                    if self.rate_limit_requests > 0 and request_counter >= self.rate_limit_requests:
-                        logging.info(f"已完成 {request_counter} 次请求，休眠 {self.rate_limit_sleep} 秒以避免限流...")
-                        await asyncio.sleep(self.rate_limit_sleep)
-                        request_counter = 0  # 重置计数器
-                        logging.info("休眠结束，继续爬取")
                     
                     if post_data:
                         self.all_posts_data.append(post_data)
@@ -893,19 +713,12 @@ class PostCrawler:
                             logging.error("连续失败过多，停止爬取")
                             break
                     
-                    # 检查是否需要限流休眠
-                    if self.rate_limit_requests > 0 and request_counter >= self.rate_limit_requests:
-                        logging.info(f"已完成 {request_counter} 次请求，休眠 {self.rate_limit_sleep} 秒以避免限流...")
-                        await asyncio.sleep(self.rate_limit_sleep)
-                        request_counter = 0  # 重置计数器
-                        logging.info("休眠结束，继续爬取")
-                    
                 except Exception as e:
                     consecutive_failures += 1
                     logging.error(f"处理帖子出错 (索引 {index}): {e}")
                     if consecutive_failures >= 5:
                         break
-                    await self.page.wait_for_timeout(random.randint(self.delays['action_min'], self.delays['action_max']))
+                    await asyncio.sleep(random.uniform(self.delays['retry_min'] / 1000, self.delays['retry_max'] / 1000))
             
             # 检查是否正常完成（所有待爬取的都处理完了）
             if i == total_pending - 1 and consecutive_failures < 5:
@@ -935,8 +748,6 @@ async def main():
     
     # 配置参数
     target_url = "https://www.reddit.com/r/dogs/"
-    headless = False
-    use_system_browser = 'chrome'  # 'chrome', 'edge', 或 None
     
     # 区间爬取参数（0-based索引，包含边界）
     # 设置为None表示不限制，爬取全部
@@ -946,17 +757,13 @@ async def main():
     
     crawler = PostCrawler(
         subreddit_url=target_url,
-        headless=headless,
-        use_system_browser=use_system_browser,
         start_index=start_index,
         end_index=end_index,
-        rate_limit_requests=100,  # 每100次请求后休眠
-        rate_limit_sleep=360,  # 休眠时间经过开发者模式获取到的响应头估计，是360秒
         delays={
-            'page_min': 3000, 'page_max': 5000,
-            'action_min': 3000, 'action_max': 8000,
-            'scroll_min': 5000, 'scroll_max': 10000,
-            'api_min': 100, 'api_max': 500
+            'api_min': 50,
+            'api_max': 200,
+            'retry_min': 1000,
+            'retry_max': 3000
         }
     )
     
