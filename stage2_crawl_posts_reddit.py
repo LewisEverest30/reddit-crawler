@@ -682,12 +682,34 @@ class PostCrawler:
 
     async def fetch_post_json(self, post_url, url_index, source="unknown"):
         """获取单个帖子的JSON数据"""
+        max_retries = 100
+        base_wait_time = 20  # 基础等待时间（秒）
+        
         try:
             # 构造JSON API URL
             base_url = post_url.split('?')[0]
             json_url = base_url.rstrip('/') + ".json"
             
-            await self.page.goto(json_url, wait_until='domcontentloaded', timeout=15000)
+            # 带重试的goto逻辑
+            for retry in range(max_retries):
+                try:
+                    await self.page.goto(json_url, wait_until='domcontentloaded', timeout=15000)
+                    break  # 成功则跳出重试循环
+                except Exception as goto_error:
+                    error_msg = str(goto_error)
+                    # 检查是否是HTTP响应码失败错误（Reddit限流）
+                    if 'ERR_HTTP_RESPONSE_CODE_FAILURE' in error_msg or 'net::ERR_HTTP_RESPONSE_CODE_FAILURE' in error_msg:
+                        if retry < max_retries - 1:
+                            wait_time = base_wait_time  # 不使用指数退避，固定等待
+                            logging.warning(f"检测到Reddit限流 (ERR_HTTP_RESPONSE_CODE_FAILURE)，第 {retry + 1}/{max_retries} 次重试，等待 {wait_time} 秒...")
+                            await asyncio.sleep(wait_time)
+                        else:
+                            logging.error(f"达到最大重试次数 {max_retries}，仍然触发限流，放弃该帖子")
+                            raise
+                    else:
+                        # 其他类型的错误直接抛出
+                        raise
+            
             await self.page.wait_for_timeout(random.randint(self.delays['api_min'], self.delays['api_max']))
             
             # 检查CAPTCHA或登录验证
@@ -902,13 +924,6 @@ class PostCrawler:
                             logging.error("连续失败过多，停止爬取")
                             break
                     
-                    # 检查是否需要限流休眠
-                    if self.rate_limit_requests > 0 and request_counter >= self.rate_limit_requests:
-                        logging.info(f"已完成 {request_counter} 次请求，休眠 {self.rate_limit_sleep} 秒以避免限流...")
-                        await asyncio.sleep(self.rate_limit_sleep)
-                        request_counter = 0  # 重置计数器
-                        logging.info("休眠结束，继续爬取")
-                    
                 except Exception as e:
                     consecutive_failures += 1
                     logging.error(f"处理帖子出错 (索引 {index}): {e}")
@@ -960,12 +975,12 @@ async def main():
         start_index=start_index,
         end_index=end_index,
         rate_limit_requests=100,  # 每100次请求后休眠
-        rate_limit_sleep=400,  # 休眠时间经过开发者模式获取到的响应头估计
+        rate_limit_sleep=350,  # 休眠时间经过开发者模式获取到的响应头估计
         delays={
-            'page_min': 3000, 'page_max': 5000,
-            'action_min': 3000, 'action_max': 8000,
+            'page_min': 3000, 'page_max': 3000,
+            'action_min': 3000, 'action_max': 3000,
             'scroll_min': 5000, 'scroll_max': 10000,
-            'api_min':500, 'api_max': 500
+            'api_min':1000, 'api_max': 1000
         }
     )
     
