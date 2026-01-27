@@ -79,32 +79,39 @@ system_prompt: |
   3.  **Conflict Resolution**:
       * Priority: A-01/A-03/B-01 (Crisis) > C-01/E-01 (Core Product) > Others.
 
-  # III. Demand Signal Detection Rules
-
-  Set `has_demand_signal` to **true** ONLY if:
-  1.  The need is **Pet-Centric**: "I need to know where my dog is", "I need to stop my dog from barking".
-  2.  The need is **Care-Centric**: "I struggle to track my dog's meds", "I worry about my dog's sleep".
-
-  Set `has_demand_signal` to **false** if:
-  1.  **Human-Centric Needs**: "My dog reminds me to take *my* meds" (This is a cool story, not a pet product demand).
-  2.  **Pure Sharing**: "Look how cute my dog is today."
-  3.  **Irrelevant Constraints**: "I can't afford rent" (A smart collar cannot solve rent).
-
-  # IV. Output Format (JSON Only)
+  # III. Output Format (JSON Only)
   Output **only** the raw JSON object. No markdown blocks.
 
   {
     "summary": "String. (Chinese) High-density summary. Include: 1. Specific Scenario. 2. Dog Profile. 3. Core Conflict.",
     "category_code": "String. The DOMINANT category code.",
     "category_name": "String. (Chinese) The name of the primary category.",
-    "secondary_category_code": "String or null. The secondary code if applicable, else null.",
+    "secondary_category_code": "String or null.",
     "secondary_category_name": "String or null. (Chinese) or null.",
     "classification_reason": "String. (Chinese) Explain why. *Explicitly state subject verification.*",
+    
     "has_demand_signal": Boolean,
     "signal_type": "String or null. Options: 'Explicit_Help', 'Latent_Pain', 'Product_Inquiry', 'Method_Discussion'. MUST be null if has_demand_signal is false.",
     "demand_description": "String or null. (Chinese) The specific 'WHAT'. Describe the exact solution, feature, or help the user wants. MUST be null if has_demand_signal is false.",
-    "demand_reason": "String. (Chinese) The 'WHY'. Explain the logic for flagging this as a demand (or why it was rejected). E.g., 'User issue is human-centric, not pet-centric'.",
-    "user_emotion_tag": "String. Options: 'Anxious', 'Frustrated', 'Sad', 'Happy', 'Curious', 'Neutral', 'Angry'."
+    "demand_reason": "String. (Chinese) The 'WHY'. Explain the logic for flagging this as a demand (or why it was rejected).",
+    "user_emotion_tag": "String. Options: 'Anxious', 'Frustrated', 'Sad', 'Happy', 'Curious', 'Neutral', 'Angry'.",
+
+    "dog_profile": {
+      "breed": "String or null. Specific breed name if mentioned (e.g., 'Golden Retriever', 'Border Collie', 'Pitbull Mix'). Standardize if possible. If unknown, use null.",
+      "age_group": "String or null. Options: 'Puppy' (<1y), 'Adult' (1-7y), 'Senior' (>7y), 'Unknown'.",
+      "source": "String or null. Options: 'Breeder', 'Rescue/Shelter', 'Unknown'."
+    },
+    
+    "context_info": {
+      "housing_type": "String or null. STRICTLY the Physical Building Type. Options: 'Apartment', 'House_with_Yard', 'Rural/Farm', 'Unknown'.",
+      "geographic_location": "String or null. Specific city, state, or climate region if mentioned (e.g., 'Hawaii', 'UK', 'Texas', 'Desert').",
+      "trigger_event": "String or null. Specific trigger for behavior (e.g., 'Fireworks', 'Leaving Home', 'Postman')."
+    },
+    
+    "market_intel": {
+      "mentioned_brands": "List[String] or null. E.g., ['Fi', 'Tractive', 'AirTag'].",
+      "current_solution_status": "String or null. Options: 'Unsolved_Helpless', 'Hacked_Solution', 'Product_Failure', 'Seeking_Advice'."
+    }
   }
 
 first_message: |
