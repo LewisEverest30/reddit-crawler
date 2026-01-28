@@ -25,45 +25,45 @@ system_prompt: |
   Match the post to exactly ONE **Primary Category**.
 
   ## A. 安全与物理风险 (Safety & Physical Risks)
-  - **A-01 [走失与召回失败]**: Pet is lost, owner panic, recall failed.
-  - **A-02 [逃逸与围栏突破]**: Escaping containment.
-  - **A-03 [环境威胁与事故]**: External threats (coyotes, heatstroke).
-  - **A-04 [装备与硬件故障]**: Equipment failure.
+  - **A-01 [走失与召回失败]**: (Lost & Recall Fail) Pet is lost, owner panic, recall failed.
+  - **A-02 [逃逸与围栏突破]**: (Escaping Containment) Digging under fence, slipping collar.
+  - **A-03 [环境威胁与事故]**: (External Threats) Coyotes, heatstroke, poison, car accidents.
+  - **A-04 [装备与硬件故障]**: (Equipment Failure) Leash broke, collar failed, battery died.
 
   ## B. 生理健康与医疗 (Physical Health & Medical)
   *Focus: Biological function and illness **OF THE DOG**.*
-  - **B-01 [急性病症与创伤]**: Acute issues of the dog.
-  - **B-02 [慢性病与长期护理]**: Chronic issues **of the DOG**. **EXCLUDE owner's health.**
-  - **B-03 [饮食、排泄与营养]**: Diet/Gut.
-  - **B-04 [日常护理与预防]**: Routine care.
+  - **B-01 [急性病症与创伤]**: (Acute Issues) Vomiting, blood, limping, emergency.
+  - **B-02 [慢性病与长期护理]**: (Chronic Issues) Arthritis, diabetes, seizures, sleep issues. **EXCLUDE owner's health.**
+  - **B-03 [饮食、排泄与营养]**: (Diet & Gut) Food, poop, picky eater.
+  - **B-04 [日常护理与预防]**: (Routine Care) Flea, grooming, neutering, vaccines.
 
   ## C. 心理健康与情绪状态 (Mental Health & Emotional State)
   *Focus: Internal emotional state of the dog.*
-  - **C-01 [分离焦虑 (Separation Anxiety)]**: Distress behaviors **ONLY when owner is absent/leaving**.
-  - **C-02 [恐惧、应激与反应性 (Fear & Reactivity)]**: Fear-based.
-  - **C-03 [攻击性情绪 (Aggression)]**: Hostility/Guarding.
-  - **C-04 [抑郁与低落 (Depression & Lethargy)]**: Low mood (not physical).
+  - **C-01 [分离焦虑]**: (Separation Anxiety) Distress behaviors **ONLY when owner is absent/leaving**.
+  - **C-02 [恐惧、应激与反应性]**: (Fear & Reactivity) Scared of thunder/fireworks/strangers.
+  - **C-03 [攻击性情绪]**: (Aggression) Resource guarding, hostility, biting.
+  - **C-04 [抑郁与低落]**: (Depression & Lethargy) Low mood, grieving.
 
   ## D. 行为管理与训练 (Behavior & Training)
-  - **D-01 [服从性与技能训练]**: Commands, service tasks.
-  - **D-02 [如厕训练 (Potty Training)]**: House breaking.
-  - **D-03 [破坏性与坏习惯 (General Destructive Behavior)]**: Owner present.
-  - **D-04 [社交与适应性]**: Social skills.
+  - **D-01 [服从性与技能训练]**: (Obedience & Skills) Commands, service tasks, heel.
+  - **D-02 [如厕训练]**: (Potty Training) House breaking, accidents inside.
+  - **D-03 [破坏性与坏习惯]**: (Bad Manners) Chewing, jumping, demand barking (Owner present).
+  - **D-04 [社交与适应性]**: (Socialization) Dog park etiquette, introducing new pets.
 
   ## E. 活动、探险与生活质量 (Activity, Exploration & Enrichment)
-  - **E-01 [嗅闻、探险与自由活动 (Sniffing & Exploration)]**: GPS/Tracking focus.
-  - **E-02 [运动量与体能释放]**: Physical exercise.
-  - **E-03 [室内丰容与游戏 (Indoor Enrichment)]**: Mental stim.
-  - **E-04 [情感连接与陪伴]**: Bonding, **dog sensing owner's illness/emotion**.
+  - **E-01 [嗅闻、探险与自由活动]**: (Sniffing & Exploration) GPS/Tracking focus, off-leash walks, "Sniffari".
+  - **E-02 [运动量与体能释放]**: (Physical Exercise) Running, fetch, hiking, agility.
+  - **E-03 [室内丰容与游戏]**: (Indoor Enrichment) Puzzles, mental stimulation.
+  - **E-04 [情感连接与陪伴]**: (Bonding & Empathy) Love, cute photos, **dog sensing owner's illness**.
 
   ## F. 养宠经验与观点 (Ownership Experience & Opinions)
-  - **F-01 [品种选择与特性]**: Breed discussion.
-  - **F-02 [养宠成本、法律与居住]**: Costs, laws.
-  - **F-03 [产品/服务评测与推荐]**: Product reviews.
+  - **F-01 [品种选择与特性]**: (Breed Discussion) Traits, selection advice.
+  - **F-02 [养宠成本、法律与居住]**: (Cost & Laws) Rent, vet bills, insurance.
+  - **F-03 [产品/服务评测与推荐]**: (Reviews) Product recommendations (general).
 
   ## G. 其他 (Other)
-  - **G-01 [无关/广告/垃圾信息]**: Spam/Off-topic.
-  - **G-02 [无法分类/特殊话题]**: Rare topics strictly not fitting A-F.
+  - **G-01 [无关/广告/垃圾信息]**: (Spam/Off-topic)
+  - **G-02 [无法分类/特殊话题]**: (Unclassifiable) Rare topics strictly not fitting A-F.
 
   # II. Decision Logic (DeepSeek Reasoning Chain)
 
@@ -73,7 +73,7 @@ system_prompt: |
   2.  **Product Relevance Check (CRITICAL)**:
       * **Ask**: "Can a smart pet product (Collar/App) theoretically solve or help this?"
       * **Yes**: If the problem is about the dog's location, health, behavior, or the owner's struggle to manage the dog.
-      * **No**: If the problem is about **human health management** (e.g., owner forgets meds), **human relationships** (e.g., divorce), or **finances**.
+      * **No**: If the problem is about **human health management**, **human relationships**, or **finances**.
       * *Result*: If No, set `has_demand_signal` to `false`.
 
   3.  **Conflict Resolution**:
@@ -85,32 +85,32 @@ system_prompt: |
   {
     "summary": "String. (Chinese) High-density summary. Include: 1. Specific Scenario. 2. Dog Profile. 3. Core Conflict.",
     "category_code": "String. The DOMINANT category code.",
-    "category_name": "String. (Chinese) The name of the primary category.",
+    "category_name": "String. Extract ONLY the Chinese text inside the brackets [] from the Taxonomy (e.g., '分离焦虑').",
     "secondary_category_code": "String or null.",
     "secondary_category_name": "String or null. (Chinese) or null.",
-    "classification_reason": "String. (Chinese) Explain why. *Explicitly state subject verification.*",
+    "classification_reason": "String. (Chinese) Explain why.",
     
     "has_demand_signal": Boolean,
     "signal_type": "String or null. Options: 'Explicit_Help', 'Latent_Pain', 'Product_Inquiry', 'Method_Discussion'. MUST be null if has_demand_signal is false.",
     "demand_description": "String or null. (Chinese) The specific 'WHAT'. Describe the exact solution, feature, or help the user wants. MUST be null if has_demand_signal is false.",
-    "demand_reason": "String. (Chinese) The 'WHY'. Explain the logic for flagging this as a demand (or why it was rejected).",
+    "demand_reason": "String. (Chinese) The 'WHY'. Explain the logic for flagging this as a demand. MUST be null if has_demand_signal is false.",
     "user_emotion_tag": "String. Options: 'Anxious', 'Frustrated', 'Sad', 'Happy', 'Curious', 'Neutral', 'Angry'.",
 
     "dog_profile": {
-      "breed": "String or null. Specific breed name if mentioned (e.g., 'Golden Retriever', 'Border Collie', 'Pitbull Mix'). Standardize if possible. If unknown, use null.",
-      "age_group": "String or null. Options: 'Puppy' (<1y), 'Adult' (1-7y), 'Senior' (>7y), 'Unknown'.",
-      "source": "String or null. Options: 'Breeder', 'Rescue/Shelter', 'Unknown'."
+      "breed": "String or null. Specific breed name. Standardize if possible. If not mentioned, MUST use null.",
+      "age_group": "String or null. Options: 'Puppy' (<1y), 'Adult' (1-7y), 'Senior' (>7y). If not mentioned, MUST use null.",
+      "source": "String or null. Options: 'Breeder', 'Rescue/Shelter'. If not mentioned, MUST use null."
     },
     
     "context_info": {
-      "housing_type": "String or null. STRICTLY the Physical Building Type. Options: 'Apartment', 'House_with_Yard', 'Rural/Farm', 'Unknown'.",
-      "geographic_location": "String or null. Specific city, state, or climate region if mentioned (e.g., 'Hawaii', 'UK', 'Texas', 'Desert').",
-      "trigger_event": "String or null. Specific trigger for behavior (e.g., 'Fireworks', 'Leaving Home', 'Postman')."
+      "housing_type": "String or null. STRICTLY the Physical Building Type. Options: 'Apartment', 'House_with_Yard', 'Rural/Farm'. If not mentioned, MUST use null.",
+      "geographic_location": "String or null. Specific city, state, or climate region. If not mentioned, use null.",
+      "trigger_event": "String or null. Specific trigger for behavior. If not mentioned, use null."
     },
     
     "market_intel": {
-      "mentioned_brands": "List[String] or null. E.g., ['Fi', 'Tractive', 'AirTag'].",
-      "current_solution_status": "String or null. Options: 'Unsolved_Helpless', 'Hacked_Solution', 'Product_Failure', 'Seeking_Advice'."
+      "mentioned_brands": "List[String] or null. If none, use null.",
+      "current_solution_status": "String or null. Options: 'Unsolved_Helpless', 'Hacked_Solution', 'Product_Failure', 'Seeking_Advice'. If not mentioned, use null."
     }
   }
 
