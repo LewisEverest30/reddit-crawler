@@ -107,7 +107,17 @@ class URLCollector:
                 collected_urls = state_data.get('collected_urls', [])
                 before_timestamp = state_data.get('before_timestamp', self.before_timestamp)
                 scanned_post_ids = set(state_data.get('scanned_post_ids', []))
+                file_max_posts = state_data.get('max_posts', self.max_posts)
                 is_complete = state_data.get('is_complete', False)
+                
+                # 检查当前设置的max_posts是否大于文件中的max_posts
+                if self.max_posts > file_max_posts:
+                    logging.info(f"检测到max_posts增加: {file_max_posts} -> {self.max_posts}")
+                    # 重新计算is_complete状态
+                    is_complete = len(collected_urls) >= self.max_posts
+                    # 立即更新进度文件
+                    self.save_progress(collected_urls, before_timestamp, scanned_post_ids)
+                    logging.info(f"已更新进度文件中的max_posts为 {self.max_posts}")
                 
                 if is_complete:
                     logging.info(f"URL收集已完成: {len(collected_urls)} 个帖子")
@@ -353,11 +363,10 @@ def main():
     setup_logger()
     
     # 配置参数
-    # target_url = "https://www.reddit.com/r/dogs/"
-    target_url = "https://www.reddit.com/r/DOG/"
-    target_url = "https://www.reddit.com/r/Dogowners/"
+    target_url = "https://www.reddit.com/r/dogs/"
+    # target_url = "https://www.reddit.com/r/Dogowners/"
 
-    max_posts = 50000
+    max_posts = 100000
     
     collector = URLCollector(
         subreddit_url=target_url,
